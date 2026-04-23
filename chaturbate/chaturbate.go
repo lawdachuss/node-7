@@ -638,6 +638,8 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 	lastSegURI := ""
 	lastMapURI := ""
 	consecutiveErrors := 0
+	lastSegmentTime := time.Now()
+	const staleTimeout = 3 * time.Minute // If no new segments for 3 minutes, consider stream ended
 
 	// For fMP4 streams, normalise tfdt timestamps so the recording starts
 	// at 0:00 instead of the CDN's absolute stream uptime. Always attempt
@@ -645,6 +647,10 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 	var trackBaseTimes map[uint32]uint64
 
 	for {
+		// Check if we haven't received new segments for too long
+		if time.Since(lastSegmentTime) > staleTimeout {
+			return internal.ErrChannelOffline
+		}
 		resp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
 			if consecutiveErrors++; consecutiveErrors >= 5 {
@@ -760,6 +766,8 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			if err := handler(resp, v.Duration); err != nil {
 				return fmt.Errorf("handler: %w", err)
 			}
+			// Update last segment time after successfully processing a segment
+			lastSegmentTime = time.Now()
 		}
 
 		<-time.After(1 * time.Second)
@@ -787,6 +795,8 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	var audioInitBytes []byte
 	initWritten := false
 	consecutiveErrors := 0
+	lastSegmentTime := time.Now()
+	const staleTimeout = 3 * time.Minute // If no new segments for 3 minutes, consider stream ended
 
 	// Per-track tfdt base times captured from the first segment of each track.
 	// Subtracting these normalises timestamps to start from zero.
@@ -796,6 +806,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	audioBaseSet := false
 
 	for {
+		// Check if we haven't received new segments for too long
+		if time.Since(lastSegmentTime) > staleTimeout {
+			return internal.ErrChannelOffline
+		}
 		// Fetch video playlist
 		videoResp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
@@ -1037,6 +1051,8 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 					if err := handler(chunk, chunkDuration); err != nil {
 						return fmt.Errorf("handler muxed segment group: %w", err)
 					}
+					// Update last segment time after successfully processing segments
+					lastSegmentTime = time.Now()
 				}
 			}
 
@@ -1138,6 +1154,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			if err := handler(seg.data, seg.duration); err != nil {
 				return fmt.Errorf("handler muxed segment: %w", err)
 			}
+		}
+		// Update last segment time after successfully processing segments
+		if len(pending) > 0 {
+			lastSegmentTime = time.Now()
 		}
 
 		<-time.After(1 * time.Second)
