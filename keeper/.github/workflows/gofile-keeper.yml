@@ -1,0 +1,412 @@
+name: GoFile Link Keeper
+
+on:
+  # Smart scheduling - runs at different frequencies automatically
+  # Note: GitHub Actions cron may have 5-15 minute delays during high load
+  schedule:
+    # Critical: Every 2 hours (ensures 8-day safety margin)
+    - cron: '0 */2 * * *'     # 00:00, 02:00, 04:00, 06:00, 08:00, 10:00, 12:00, 14:00, 16:00, 18:00, 20:00, 22:00
+    
+    # Important: Every 6 hours (staggered timing to avoid overlap)
+    - cron: '30 */6 * * *'    # 00:30, 06:30, 12:30, 18:30
+    
+    # Normal: Every 12 hours (different timing)
+    - cron: '45 */12 * * *'   # 00:45, 12:45
+    
+    # Maintenance: Daily comprehensive check
+    - cron: '15 4 * * *'      # 04:15 daily
+    
+    # Backup safety net: Every 8 hours (in case other schedules fail)
+    - cron: '50 */8 * * *'    # 00:50, 08:50, 16:50
+    
+    # Weekend boost: Extra runs on Saturday/Sunday (when GitHub is less loaded)
+    - cron: '25 */4 * * 6,0'  # Every 4 hours on weekends
+  
+  # Manual trigger with full control
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Execution mode'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+        - auto
+        - aggressive
+        - conservative
+        - emergency
+        - test
+      batch_size:
+        description: 'Max files to process (0 = auto)'
+        required: false
+        default: '0'
+      force_all:
+        description: 'Force process all files (ignore intervals)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # Smart defaults that adjust based on context
+  PYTHONUNBUFFERED: 1
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+  smart-keeper:
+    name: Smart GoFile Keeper
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r keeper/requirements.txt
+      
+      - name: Determine execution parameters
+        id: params
+        run: |
+          # Get current time info
+          HOUR=$(date +%H)
+          MINUTE=$(date +%M)
+          DAY_OF_WEEK=$(date +%u)  # 1=Monday, 7=Sunday
+          
+          # Determine mode based on trigger and timing
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ github.event.inputs.mode }}"
+            BATCH_SIZE="${{ github.event.inputs.batch_size }}"
+            FORCE_ALL="${{ github.event.inputs.force_all }}"
+          else
+            # Auto-determine based on schedule timing
+            if [ $((HOUR % 2)) -eq 0 ] && [ $MINUTE -eq 0 ]; then
+              MODE="critical_2h"
+            elif [ $((HOUR % 6)) -eq 0 ] && [ $MINUTE -eq 30 ]; then
+              MODE="important_6h"
+            elif [ $((HOUR % 12)) -eq 0 ] && [ $MINUTE -eq 45 ]; then
+              MODE="normal_12h"
+            elif [ $HOUR -eq 4 ] && [ $MINUTE -eq 15 ]; then
+              MODE="maintenance_daily"
+            elif [ $((HOUR % 8)) -eq 0 ] && [ $MINUTE -eq 50 ]; then
+              MODE="backup_8h"
+            elif [ $((HOUR % 4)) -eq 0 ] && [ $MINUTE -eq 25 ] && [ $DAY_OF_WEEK -gt 5 ]; then
+              MODE="weekend_4h"
+            else
+              MODE="auto_fallback"
+            fi
+            BATCH_SIZE="0"
+            FORCE_ALL="false"
+          fi
+          
+          # Set parameters based on mode with 24/7 optimization
+          case $MODE in
+            critical_2h)
+              PRIORITY="critical"
+              BATCH=${BATCH_SIZE:-20}    # Smaller batches for frequent runs
+              DELAY=10                   # Longer delays to be respectful
+              INTERVAL=0.08              # 2 hours
+              AGE_FILTER=1               # Files uploaded in last 1 day
+              ;;
+            important_6h)
+              PRIORITY="important"
+              BATCH=${BATCH_SIZE:-35}
+              DELAY=6
+              INTERVAL=0.25              # 6 hours
+              AGE_FILTER=7               # Files uploaded in last 7 days
+              ;;
+            normal_12h)
+              PRIORITY="normal"
+              BATCH=${BATCH_SIZE:-50}
+              DELAY=4
+              INTERVAL=0.5               # 12 hours
+              AGE_FILTER=30              # Files uploaded in last 30 days
+              ;;
+            maintenance_daily)
+              PRIORITY="maintenance"
+              BATCH=${BATCH_SIZE:-75}
+              DELAY=3
+              INTERVAL=1                 # 24 hours
+              AGE_FILTER=0               # All files
+              ;;
+            backup_8h)
+              PRIORITY="backup"
+              BATCH=${BATCH_SIZE:-30}    # Safety net - smaller batch
+              DELAY=8
+              INTERVAL=0.33              # 8 hours
+              AGE_FILTER=14              # Files uploaded in last 2 weeks
+              ;;
+            weekend_4h)
+              PRIORITY="weekend"
+              BATCH=${BATCH_SIZE:-40}    # More aggressive on weekends
+              DELAY=5
+              INTERVAL=0.17              # 4 hours
+              AGE_FILTER=7               # Recent files
+              ;;
+            aggressive)
+              PRIORITY="aggressive"
+              BATCH=${BATCH_SIZE:-100}
+              DELAY=2
+              INTERVAL=0                 # Process all
+              AGE_FILTER=0               # All files
+              ;;
+            conservative)
+              PRIORITY="conservative"
+              BATCH=${BATCH_SIZE:-15}
+              DELAY=15
+              INTERVAL=2                 # 48 hours
+              AGE_FILTER=90              # Files uploaded in last 90 days
+              ;;
+            emergency)
+              PRIORITY="emergency"
+              BATCH=${BATCH_SIZE:-200}
+              DELAY=1
+              INTERVAL=0                 # Process all
+              AGE_FILTER=0               # All files
+              ;;
+            test)
+              PRIORITY="test"
+              BATCH=${BATCH_SIZE:-3}
+              DELAY=20
+              INTERVAL=0                 # Process all
+              AGE_FILTER=7               # Recent files only
+              ;;
+            *)
+              # Auto fallback mode
+              PRIORITY="auto"
+              BATCH=${BATCH_SIZE:-25}
+              DELAY=8
+              INTERVAL=0.5               # 12 hours
+              AGE_FILTER=30              # Files uploaded in last 30 days
+              ;;
+          esac
+          
+          # Override interval if force_all is true
+          if [ "$FORCE_ALL" = "true" ]; then
+            INTERVAL=0
+            AGE_FILTER=0
+          fi
+          
+          # Adjust for high-load periods (GitHub Actions can be slow)
+          CURRENT_HOUR=$(date +%H)
+          if [ $CURRENT_HOUR -ge 16 ] && [ $CURRENT_HOUR -le 20 ]; then  # Peak hours UTC
+            DELAY=$((DELAY + 3))
+            BATCH=$((BATCH * 3 / 4))
+            echo "🕐 Peak hours detected - reducing load"
+          fi
+          
+          # Weekend optimization (GitHub is typically faster)
+          if [ $DAY_OF_WEEK -gt 5 ]; then  # Weekend
+            if [ "$MODE" != "weekend_4h" ]; then
+              DELAY=$((DELAY - 1))
+              BATCH=$((BATCH * 5 / 4))
+              echo "🏖️ Weekend optimization applied"
+            fi
+          fi
+          
+          # Ensure minimum values
+          DELAY=$([ $DELAY -lt 1 ] && echo 1 || echo $DELAY)
+          BATCH=$([ $BATCH -lt 5 ] && echo 5 || echo $BATCH)
+          
+          # Output parameters
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "priority=$PRIORITY" >> $GITHUB_OUTPUT
+          echo "batch_size=$BATCH" >> $GITHUB_OUTPUT
+          echo "delay=$DELAY" >> $GITHUB_OUTPUT
+          echo "interval=$INTERVAL" >> $GITHUB_OUTPUT
+          echo "age_filter=$AGE_FILTER" >> $GITHUB_OUTPUT
+          
+          # Enhanced logging
+          echo "🤖 Smart Keeper 24/7 Configuration:"
+          echo "   Trigger: ${{ github.event_name }}"
+          echo "   Mode: $MODE"
+          echo "   Priority: $PRIORITY"
+          echo "   Batch Size: $BATCH"
+          echo "   Delay: ${DELAY}s"
+          echo "   Interval: ${INTERVAL} days"
+          echo "   Age Filter: ${AGE_FILTER} days"
+          echo "   Force All: $FORCE_ALL"
+          echo "   Day: $(date +%A) ($(date +%u))"
+          echo "   Time: $(date +%H:%M) UTC"
+          echo "   Peak Hours: $([ $CURRENT_HOUR -ge 16 ] && [ $CURRENT_HOUR -le 20 ] && echo 'Yes' || echo 'No')"
+      
+      - name: Pre-flight checks
+        id: preflight
+        run: |
+          echo "🔍 Running pre-flight checks..."
+          
+          # Check if secrets are set
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_API_KEY }}" ]; then
+            echo "❌ Missing required secrets: SUPABASE_URL and/or SUPABASE_API_KEY"
+            echo "check_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Test Supabase connection
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: ${{ secrets.SUPABASE_API_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_API_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/gofile_uploads?limit=1")
+          
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ Supabase connection failed (HTTP $HTTP_CODE)"
+            echo "check_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ Pre-flight checks passed"
+          echo "check_passed=true" >> $GITHUB_OUTPUT
+      
+      - name: Run Smart GoFile Keeper
+        if: steps.preflight.outputs.check_passed == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
+          BATCH_SIZE: ${{ steps.params.outputs.batch_size }}
+          DELAY_BETWEEN_REQUESTS: ${{ steps.params.outputs.delay }}
+          MIN_KEEP_INTERVAL_DAYS: ${{ steps.params.outputs.interval }}
+          PRIORITY_MODE: ${{ steps.params.outputs.priority }}
+          AGE_FILTER_DAYS: ${{ steps.params.outputs.age_filter }}
+          EXECUTION_MODE: ${{ steps.params.outputs.mode }}
+        run: |
+          echo "🚀 Starting Smart GoFile Keeper..."
+          python keeper/keeper.py
+        continue-on-error: true
+        id: keeper
+      
+      - name: Handle failures and retries
+        if: steps.keeper.outcome == 'failure'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
+          BATCH_SIZE: 10  # Smaller batch for retry
+          DELAY_BETWEEN_REQUESTS: 15  # Longer delay for retry
+          MIN_KEEP_INTERVAL_DAYS: ${{ steps.params.outputs.interval }}
+          PRIORITY_MODE: "retry"
+          AGE_FILTER_DAYS: 7  # Only recent files on retry
+        run: |
+          echo "⚠️ First attempt failed, retrying with conservative settings..."
+          sleep 30  # Wait before retry
+          python keeper/keeper.py || echo "❌ Retry also failed"
+      
+      - name: Post-execution analysis
+        if: always()
+        run: |
+          echo "📊 Post-execution analysis:"
+          
+          # Check if keeper ran successfully
+          if [ "${{ steps.keeper.outcome }}" = "success" ]; then
+            echo "✅ Keeper executed successfully"
+          else
+            echo "❌ Keeper execution failed"
+          fi
+          
+          # Log execution time
+          echo "⏱️ Execution completed at: $(date)"
+          
+          # Estimate next run time based on current schedule
+          HOUR=$(date +%H)
+          case $HOUR in
+            0|2|4|6|8|10|12|14|16|18|20|22)
+              echo "🔄 Next high-priority run in ~2 hours"
+              ;;
+            *)
+              echo "🔄 Next run varies by priority level"
+              ;;
+          esac
+      
+      - name: Cleanup and rate limiting
+        if: always()
+        run: |
+          echo "🧹 Performing cleanup..."
+          
+          # Add random delay to prevent synchronized runs across repos
+          RANDOM_DELAY=$((RANDOM % 60 + 30))  # 30-90 seconds
+          echo "⏳ Adding random delay: ${RANDOM_DELAY}s to prevent rate limiting"
+          sleep $RANDOM_DELAY
+          
+          echo "✅ Cleanup completed"
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keeper-failure-logs-${{ github.run_number }}
+          path: |
+            keeper/*.log
+            /tmp/keeper-*.log
+          retention-days: 7
+      
+      - name: Summary report
+        if: always()
+        run: |
+          echo ""
+          echo "======================================"
+          echo "🎯 SMART KEEPER EXECUTION SUMMARY"
+          echo "======================================"
+          echo "Mode: ${{ steps.params.outputs.mode }}"
+          echo "Priority: ${{ steps.params.outputs.priority }}"
+          echo "Batch Size: ${{ steps.params.outputs.batch_size }}"
+          echo "Status: ${{ steps.keeper.outcome }}"
+          echo "Time: $(date)"
+          echo "======================================"
+          
+          # Set job summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🤖 Smart GoFile Keeper Report
+          
+          **Execution Details:**
+          - **Mode**: ${{ steps.params.outputs.mode }}
+          - **Priority**: ${{ steps.params.outputs.priority }}
+          - **Batch Size**: ${{ steps.params.outputs.batch_size }}
+          - **Status**: ${{ steps.keeper.outcome }}
+          - **Time**: $(date)
+          
+          **Next Scheduled Runs:**
+          - Critical: Every 2 hours
+          - Important: Every 6 hours  
+          - Normal: Every 12 hours
+          - Maintenance: Daily at 04:15 UTC
+          - Backup: Every 8 hours
+          - Weekend Boost: Every 4 hours (Sat/Sun)
+          
+          **Manual Trigger Options:**
+          - \`auto\`: Smart defaults
+          - \`aggressive\`: Maximum processing
+          - \`conservative\`: Minimal processing
+          - \`emergency\`: Process everything ASAP
+          - \`test\`: Safe testing mode
+          EOF
+      
+      - name: Keep repository active (prevent 60-day disable)
+        if: always()
+        run: |
+          # Create a small activity file to keep repo active
+          # This prevents GitHub from disabling cron jobs after 60 days
+          mkdir -p .keeper
+          echo "Last keeper run: $(date)" > .keeper/activity.txt
+          echo "Run count: ${{ github.run_number }}" >> .keeper/activity.txt
+          echo "Mode: ${{ steps.params.outputs.mode }}" >> .keeper/activity.txt
+          
+          # Only commit if we're in maintenance mode (once daily)
+          if [ "${{ steps.params.outputs.mode }}" = "maintenance_daily" ]; then
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            
+            if git diff --quiet .keeper/activity.txt 2>/dev/null; then
+              echo "📝 No activity file changes to commit"
+            else
+              git add .keeper/activity.txt
+              git commit -m "🤖 Keeper activity update - $(date +%Y-%m-%d)" || echo "Nothing to commit"
+              
+              # Try to push, but don't fail if it doesn't work
+              git push origin HEAD:${{ github.ref_name }} || echo "⚠️ Could not push activity update (this is OK)"
+              echo "📝 Repository activity updated to prevent cron disable"
+            fi
+          fi
