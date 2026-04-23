@@ -49,6 +49,7 @@ type Channel struct {
 	monitorRunID            uint64
 	monitorDone             chan struct{}
 	doneOnce                sync.Once
+	segmentCount            int // Counter for periodic sync
 
 	File           *os.File
 	mp4InitSegment []byte

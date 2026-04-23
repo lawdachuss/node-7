@@ -59,19 +59,42 @@ type uploadResponse struct {
 
 // Upload uploads a file to GoFile and returns the download link
 func (u *GoFileUploader) Upload(filePath string) (string, error) {
-	// Step 1: Get the best server
-	server, err := u.getBestServer()
-	if err != nil {
-		return "", fmt.Errorf("get best server: %w", err)
-	}
+	var downloadLink string
+	var lastErr error
+	
+	// Retry with exponential backoff: 0s, 5s, 15s, 35s (total ~55s)
+	maxAttempts := 4
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			backoff := time.Duration((1<<uint(attempt-2))*5) * time.Second // 5s, 10s, 20s
+			time.Sleep(backoff)
+		}
+		
+		// Step 1: Get the best server
+		server, err := u.getBestServer()
+		if err != nil {
+			lastErr = fmt.Errorf("get best server: %w", err)
+			if attempt < maxAttempts {
+				continue
+			}
+			return "", lastErr
+		}
 
-	// Step 2: Upload the file
-	downloadLink, err := u.uploadFile(server, filePath)
-	if err != nil {
-		return "", fmt.Errorf("upload file: %w", err)
+		// Step 2: Upload the file
+		downloadLink, err = u.uploadFile(server, filePath)
+		if err != nil {
+			lastErr = fmt.Errorf("upload file: %w", err)
+			if attempt < maxAttempts {
+				continue
+			}
+			return "", lastErr
+		}
+		
+		// Success!
+		return downloadLink, nil
 	}
-
-	return downloadLink, nil
+	
+	return "", lastErr
 }
 
 func (u *GoFileUploader) getBestServer() (string, error) {

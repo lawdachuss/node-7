@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/chaturbate"
@@ -64,13 +65,19 @@ func (ch *Channel) Monitor(runID uint64) {
 		}
 		// isExpectedOffline returns true for errors where the full interval delay is appropriate.
 		// Transient errors (502, decode errors, network hiccups) should retry quickly.
+		// If stream just ended after recording, also retry quickly to catch if they go live again.
 		isExpectedOffline := func(err error) bool {
+			// If stream just ended after recording, check again quickly
+			if errors.Is(err, internal.ErrStreamEnded) {
+				return false
+			}
 			return errors.Is(err, internal.ErrChannelOffline) ||
 				errors.Is(err, internal.ErrPrivateStream) ||
 				errors.Is(err, internal.ErrHiddenStream) ||
 				errors.Is(err, internal.ErrAgeVerification) ||
 				errors.Is(err, internal.ErrCloudflareBlocked) ||
-				errors.Is(err, internal.ErrRoomPasswordRequired)
+				errors.Is(err, internal.ErrRoomPasswordRequired) ||
+				errors.Is(err, internal.ErrDiskSpaceCritical)
 		}
 		onRetry := func(_ uint, err error) {
 			ch.UpdateOnlineStatus(false)
@@ -82,8 +89,12 @@ func (ch *Channel) Monitor(runID uint64) {
 				notifier.Default.ResetCooldown(fmt.Sprintf(notifier.KeyCFChannel, ch.Config.Username))
 			}
 
-			if errors.Is(err, internal.ErrChannelOffline) {
+			if errors.Is(err, internal.ErrStreamEnded) {
+				ch.Info("stream ended, checking again in 10s")
+			} else if errors.Is(err, internal.ErrChannelOffline) {
 				ch.Info("channel is offline, try again in %d min(s)", server.Config.Interval)
+			} else if errors.Is(err, internal.ErrDiskSpaceCritical) {
+				ch.Info("disk space critical, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrPrivateStream) {
 				ch.Info("channel is in a private show, try again in %d min(s)", server.Config.Interval)
 			} else if errors.Is(err, internal.ErrHiddenStream) {
@@ -116,6 +127,18 @@ func (ch *Channel) Monitor(runID uint64) {
 		delayFn := func(_ uint, err error, _ *retry.Config) time.Duration {
 			if isExpectedOffline(err) {
 				base := time.Duration(server.Config.Interval) * time.Minute
+				
+				// Apply exponential backoff for Cloudflare blocks
+				if errors.Is(err, internal.ErrCloudflareBlocked) && ch.CFBlockCount > 1 {
+					// Exponential backoff: 5min, 10min, 20min, 30min (capped)
+					multiplier := 1 << (ch.CFBlockCount - 1) // 2^(n-1): 1, 2, 4, 8...
+					if multiplier > 6 {
+						multiplier = 6 // Cap at 6x = 30 minutes for 5-minute interval
+					}
+					base = base * time.Duration(multiplier)
+					ch.Info("applying exponential backoff for CF block #%d: %v", ch.CFBlockCount, base)
+				}
+				
 				jitter := time.Duration(rand.Int63n(int64(base/5))) - base/10 // ±10% of interval
 				return base + jitter
 			}
@@ -157,6 +180,18 @@ func (ch *Channel) Update() {
 // RecordStream records the stream of the channel using the provided site and HTTP client.
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, req *internal.Req) error {
+	// Pre-flight disk space check
+	diskPercent := server.Manager.CheckDiskSpace()
+	if diskPercent > 0 {
+		critThresh := float64(server.Config.DiskCriticalPercent)
+		if critThresh <= 0 {
+			critThresh = 95
+		}
+		if diskPercent >= critThresh {
+			return fmt.Errorf("disk space critical (%.0f%% used): %w", diskPercent, internal.ErrDiskSpaceCritical)
+		}
+	}
+	
 	ch.fileMu.Lock()
 	ch.mp4InitSegment = nil
 	ch.fileMu.Unlock()
@@ -256,9 +291,19 @@ func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, 
 	}
 	ch.Info("stream type: %s, resolution %dp (target: %dp), framerate %dfps (target: %dfps)", streamType, playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
 
-	return playlist.WatchSegments(ctx, func(b []byte, duration float64) error {
+	// WatchSegments will block here while recording, and return when stream ends
+	// We mark that recording was successful by returning a special error
+	err = playlist.WatchSegments(ctx, func(b []byte, duration float64) error {
 		return ch.handleSegmentForMonitor(runID, b, duration)
 	})
+	
+	// If we successfully started recording and it ended, return a special error
+	// to signal that we should check again immediately
+	if err == nil || errors.Is(err, internal.ErrChannelOffline) {
+		return internal.ErrStreamEnded
+	}
+	
+	return err
 }
 
 // handleSegmentForMonitor processes and writes segment data for a specific
@@ -290,6 +335,12 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 			return fmt.Errorf("write mp4 init segment: %w", err)
 		}
 		ch.Filesize += n
+		
+		// CRITICAL: Sync init segment immediately to ensure file is playable
+		// even if process is killed (e.g., workflow cancellation)
+		if err := ch.File.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
+			ch.Error("init segment sync failed: %v", err)
+		}
 	}
 
 	n, err := ch.File.Write(b)
@@ -300,6 +351,19 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 
 	ch.Filesize += n
 	ch.Duration += duration
+	ch.segmentCount++
+	
+	// Periodic sync every 10 segments (~10 seconds) to minimize data loss
+	// on forced shutdown (e.g., GitHub Actions workflow cancellation)
+	if ch.segmentCount%10 == 0 {
+		if err := ch.File.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
+			// Log but don't fail - sync is best-effort for crash protection
+			if server.Config.Debug {
+				ch.Error("periodic sync failed: %v", err)
+			}
+		}
+	}
+	
 	formattedDuration := internal.FormatDuration(ch.Duration)
 	formattedFilesize := internal.FormatFilesize(ch.Filesize)
 	shouldSwitch := ch.shouldSwitchFileLocked()
@@ -320,6 +384,7 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 			return fmt.Errorf("next file: %w", err)
 		}
 		ch.Sequence++
+		ch.segmentCount = 0 // Reset counter for new file
 		newFilename = ch.File.Name()
 	}
 	ch.fileMu.Unlock()
