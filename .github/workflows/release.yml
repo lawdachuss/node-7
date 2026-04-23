@@ -78,7 +78,7 @@ on:
       debug:
         description: "Enable debug logging"
         required: false
-        default: false
+        default: true
         type: boolean
       run_once:
         description: "One-shot mode: record one chunk then stop (no restart)"
@@ -1281,7 +1281,7 @@ jobs:
                     resolution:   "${{ inputs.resolution   || '9999' }}",
                     framerate:    "${{ inputs.framerate    || '60' }}",
                     interval:     "${{ inputs.interval     || '1' }}",
-                    debug:        "${{ inputs.debug        || 'false' }}",
+                    debug:        "${{ inputs.debug        || 'true' }}",
                     run_once:     "false"
                   }
                 });
