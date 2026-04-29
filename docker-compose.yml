@@ -1,10 +1,10 @@
 version: '3.8'
 
 services:
-  # FlareSolverr - Cloudflare bypass service
-  flaresolverr:
+  # FlareSolverr Instance 1
+  flaresolverr-1:
     image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
+    container_name: flaresolverr-1
     environment:
       - LOG_LEVEL=info
       - LOG_HTML=false
@@ -25,12 +25,108 @@ services:
     networks:
       - recorder-network
 
+  # FlareSolverr Instance 2
+  flaresolverr-2:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr-2
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=UTC
+      - HEADLESS=true
+      - BROWSER_TIMEOUT=40000
+      - TEST_URL=https://www.google.com
+    ports:
+      - "8192:8191"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - recorder-network
+
+  # FlareSolverr Instance 3
+  flaresolverr-3:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr-3
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=UTC
+      - HEADLESS=true
+      - BROWSER_TIMEOUT=40000
+      - TEST_URL=https://www.google.com
+    ports:
+      - "8193:8191"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - recorder-network
+
+  # FlareSolverr Instance 4
+  flaresolverr-4:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr-4
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=UTC
+      - HEADLESS=true
+      - BROWSER_TIMEOUT=40000
+      - TEST_URL=https://www.google.com
+    ports:
+      - "8194:8191"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - recorder-network
+
+  # FlareSolverr Instance 5
+  flaresolverr-5:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr-5
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=UTC
+      - HEADLESS=true
+      - BROWSER_TIMEOUT=40000
+      - TEST_URL=https://www.google.com
+    ports:
+      - "8195:8191"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - recorder-network
+
   # GoOnDVR - Stream recorder
   recorder:
     build: .
     container_name: goondvr
     environment:
-      - FLARESOLVERR_URL=http://flaresolverr:8191/v1
+      - FLARESOLVERR_URL=http://flaresolverr-1:8191/v1,http://flaresolverr-2:8191/v1,http://flaresolverr-3:8191/v1,http://flaresolverr-4:8191/v1,http://flaresolverr-5:8191/v1
     ports:
       - "8080:8080"
     volumes:
@@ -38,7 +134,15 @@ services:
       - ./database:/usr/src/app/database
       - ./conf:/usr/src/app/conf
     depends_on:
-      flaresolverr:
+      flaresolverr-1:
+        condition: service_healthy
+      flaresolverr-2:
+        condition: service_healthy
+      flaresolverr-3:
+        condition: service_healthy
+      flaresolverr-4:
+        condition: service_healthy
+      flaresolverr-5:
         condition: service_healthy
     restart: unless-stopped
     networks:
