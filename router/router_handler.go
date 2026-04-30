@@ -307,11 +307,41 @@ func readLocalDatabase() []map[string]interface{} {
 			return nil
 		}
 		
-		// Add each recording to the result
+		// Add each recording to the result with normalized field names
 		for _, rec := range recordings {
 			if recMap, ok := rec.(map[string]interface{}); ok {
-				recMap["source"] = "local"
-				allRecords = append(allRecords, recMap)
+				// Normalize field names to match Supabase format
+				normalized := map[string]interface{}{
+					"source": "local",
+				}
+				
+				// Map local fields to Supabase field names
+				if username, ok := recMap["username"].(string); ok {
+					normalized["streamer_name"] = username
+				}
+				if filename, ok := recMap["filename"].(string); ok {
+					normalized["filename"] = filename
+				}
+				if gofileLink, ok := recMap["gofile_link"].(string); ok {
+					normalized["gofile_link"] = gofileLink
+				}
+				if uploadedAt, ok := recMap["uploaded_at"].(string); ok {
+					normalized["upload_date"] = uploadedAt
+				}
+				if filesize, ok := recMap["filesize_bytes"]; ok {
+					normalized["filesize_bytes"] = filesize
+				}
+				if duration, ok := recMap["duration_seconds"]; ok {
+					normalized["duration_seconds"] = duration
+				}
+				if site, ok := recMap["site"].(string); ok {
+					normalized["site"] = site
+				}
+				if id, ok := recMap["id"]; ok {
+					normalized["id"] = id
+				}
+				
+				allRecords = append(allRecords, normalized)
 			}
 		}
 		
@@ -393,10 +423,41 @@ func readLocalDatabaseByUsername(username string) []map[string]interface{} {
 			return nil
 		}
 		
+		// Add each recording to the result with normalized field names
 		for _, rec := range recordings {
 			if recMap, ok := rec.(map[string]interface{}); ok {
-				recMap["source"] = "local"
-				allRecords = append(allRecords, recMap)
+				// Normalize field names to match Supabase format
+				normalized := map[string]interface{}{
+					"source": "local",
+				}
+				
+				// Map local fields to Supabase field names
+				if user, ok := recMap["username"].(string); ok {
+					normalized["streamer_name"] = user
+				}
+				if filename, ok := recMap["filename"].(string); ok {
+					normalized["filename"] = filename
+				}
+				if gofileLink, ok := recMap["gofile_link"].(string); ok {
+					normalized["gofile_link"] = gofileLink
+				}
+				if uploadedAt, ok := recMap["uploaded_at"].(string); ok {
+					normalized["upload_date"] = uploadedAt
+				}
+				if filesize, ok := recMap["filesize_bytes"]; ok {
+					normalized["filesize_bytes"] = filesize
+				}
+				if duration, ok := recMap["duration_seconds"]; ok {
+					normalized["duration_seconds"] = duration
+				}
+				if site, ok := recMap["site"].(string); ok {
+					normalized["site"] = site
+				}
+				if id, ok := recMap["id"]; ok {
+					normalized["id"] = id
+				}
+				
+				allRecords = append(allRecords, normalized)
 			}
 		}
 		
