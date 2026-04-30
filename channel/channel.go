@@ -222,9 +222,11 @@ func (ch *Channel) Stop() {
 //
 // `startSeq` is used to prevent all channels from starting at the same time, preventing TooManyRequests errors.
 // It's only be used when program starting and trying to resume all channels at once.
+// With FlareSolverr taking ~100s per request and 5 instances, we stagger by 20s per channel
+// to maintain a steady flow without overwhelming the FlareSolverr queue.
 func (ch *Channel) Resume(startSeq int) {
 	go func() {
-		<-time.After(time.Duration(startSeq) * time.Second)
+		<-time.After(time.Duration(startSeq*20) * time.Second)
 		runID, ok := ch.requestMonitorStart()
 		if !ok {
 			return

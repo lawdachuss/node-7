@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -183,10 +182,7 @@ func ScrapeChaturbateStreamWithFlareSolverr(ctx context.Context, username string
 
 // GetFlareSolverrResponse gets the full response including HTML content
 func GetFlareSolverrResponse(ctx context.Context, url string) (*FlareSolverrResponse, error) {
-	flaresolverrURL := os.Getenv("FLARESOLVERR_URL")
-	if flaresolverrURL == "" {
-		flaresolverrURL = "http://localhost:8191/v1"
-	}
+	flaresolverrURL := getFlareSolverrURL()
 	
 	reqBody := FlareSolverrRequest{
 		Cmd:        "request.get",

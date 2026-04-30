@@ -126,7 +126,7 @@ services:
     build: .
     container_name: goondvr
     environment:
-      - FLARESOLVERR_URL=http://flaresolverr-1:8191/v1,http://flaresolverr-2:8191/v1,http://flaresolverr-3:8191/v1,http://flaresolverr-4:8191/v1,http://flaresolverr-5:8191/v1
+      - FLARESOLVERR_URL=http://flaresolverr-1:8191/v1
     ports:
       - "8080:8080"
     volumes:

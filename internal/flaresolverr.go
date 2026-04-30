@@ -9,10 +9,37 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/server"
 )
+
+// Global counter for round-robin load balancing across FlareSolverr instances
+var flaresolverrCounter uint64
+
+// getFlareSolverrURL returns a FlareSolverr URL using round-robin load balancing
+// Supports multiple instances: flaresolverr-1:8191, flaresolverr-2:8191, etc.
+func getFlareSolverrURL() string {
+	baseURL := os.Getenv("FLARESOLVERR_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8191/v1"
+	}
+	
+	// Check if we have multiple instances configured
+	// If FLARESOLVERR_URL contains "flaresolverr-1", we assume instances 1-5 exist
+	if strings.Contains(baseURL, "flaresolverr-1") {
+		// Round-robin across 5 instances
+		instanceNum := (atomic.AddUint64(&flaresolverrCounter, 1) % 5) + 1
+		url := strings.Replace(baseURL, "flaresolverr-1", fmt.Sprintf("flaresolverr-%d", instanceNum), 1)
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] Using FlareSolverr instance %d: %s\n", instanceNum, url)
+		}
+		return url
+	}
+	
+	return baseURL
+}
 
 type FlareSolverrRequest struct {
 	Cmd        string `json:"cmd"`
@@ -48,10 +75,7 @@ type FlareSolverrResponse struct {
 
 // GetFreshCookies uses FlareSolverr to bypass Cloudflare and get fresh cookies
 func GetFreshCookies(ctx context.Context, url string) (string, string, error) {
-	flaresolverrURL := os.Getenv("FLARESOLVERR_URL")
-	if flaresolverrURL == "" {
-		flaresolverrURL = "http://localhost:8191/v1"
-	}
+	flaresolverrURL := getFlareSolverrURL()
 
 	// Create a unique session for this request to avoid conflicts
 	sessionID := fmt.Sprintf("session_%d", time.Now().UnixNano())
