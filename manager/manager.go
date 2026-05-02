@@ -108,6 +108,7 @@ type settings struct {
 	StreamtapeAPIKey    string `json:"streamtape_api_key,omitempty"`
 	SupabaseURL         string `json:"supabase_url,omitempty"`
 	SupabaseAPIKey      string `json:"supabase_api_key,omitempty"`
+	ImgBBAPIKey         string `json:"imgbb_api_key,omitempty"`
 }
 
 // SaveSettings persists the current cookies and user-agent to disk.
@@ -140,6 +141,7 @@ func SaveSettings() error {
 		StreamtapeAPIKey:    server.Config.StreamtapeAPIKey,
 		SupabaseURL:         server.Config.SupabaseURL,
 		SupabaseAPIKey:      server.Config.SupabaseAPIKey,
+		ImgBBAPIKey:         server.Config.ImgBBAPIKey,
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -214,6 +216,7 @@ func LoadSettings() error {
 	server.Config.StreamtapeAPIKey = s.StreamtapeAPIKey
 	server.Config.SupabaseURL = s.SupabaseURL
 	server.Config.SupabaseAPIKey = s.SupabaseAPIKey
+	server.Config.ImgBBAPIKey = s.ImgBBAPIKey
 	if server.Config.FFmpegEncoder == "" {
 		server.Config.FFmpegEncoder = "libx264"
 	}

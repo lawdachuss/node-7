@@ -176,11 +176,8 @@ func (u *GoFileUploader) uploadFile(server, filePath string) (string, error) {
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		// Drain error channel to prevent goroutine leak
-		select {
-		case <-errChan:
-		default:
-		}
+		pipeReader.CloseWithError(err) // unblock the writer goroutine
+		<-errChan                      // drain to avoid goroutine leak
 		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()

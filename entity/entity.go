@@ -143,6 +143,9 @@ type Config struct {
 	StreamtapeLogin     string // Streamtape.com login
 	StreamtapeAPIKey    string // Streamtape.com API key
 	
+	// Thumbnail hosting
+	ImgBBAPIKey string // ImgBB API key for thumbnail uploads (https://api.imgbb.com/)
+
 	// Supabase settings
 	SupabaseURL    string // Supabase project URL
 	SupabaseAPIKey string // Supabase anon/service key

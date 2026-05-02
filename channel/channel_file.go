@@ -143,7 +143,47 @@ func (ch *Channel) generateFilenameLocked() (string, error) {
 	if err := tpl.Execute(&buf, pattern); err != nil {
 		return "", fmt.Errorf("template execution error: %w", err)
 	}
-	return buf.String(), nil
+	filename := buf.String()
+
+	// Smart strategy: when uploads are disabled and a completed dir is configured,
+	// write the recording directly into the completed directory so no post-recording
+	// move (or cross-device copy) is ever needed. The file is written once, in-place.
+	if !server.Config.EnableGoFileUpload {
+		completedDir := completedDirForChannel(ch)
+		if completedDir != "" {
+			recordingRoot := recordingDirFromPattern(ch.Config.Pattern)
+			filename = redirectToCompletedDir(filename, recordingRoot, completedDir)
+		}
+	}
+
+	return filename, nil
+}
+
+// redirectToCompletedDir rewrites a recording path so it lands directly inside
+// completedDir, preserving any sub-directory structure relative to recordingRoot.
+// Example: "videos/alice_2026-05-02_12-00-00" with root "videos" and
+// completedDir "videos/completed" -> "videos/completed/alice_2026-05-02_12-00-00".
+func redirectToCompletedDir(filename, recordingRoot, completedDir string) string {
+	cleanRoot := filepath.Clean(recordingRoot)
+	cleanCompleted := filepath.Clean(completedDir)
+
+	// Avoid double-nesting if the file is already inside completedDir.
+	if strings.HasPrefix(filepath.Clean(filename)+string(os.PathSeparator), cleanCompleted+string(os.PathSeparator)) ||
+		filepath.Clean(filename) == cleanCompleted {
+		return filename
+	}
+
+	// Strip the recording root prefix to get the relative path (dir + basename).
+	rel, err := filepath.Rel(cleanRoot, filepath.Dir(filename))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		// Can't compute a clean relative path; just put the file directly in completedDir.
+		return filepath.Join(completedDir, filepath.Base(filename))
+	}
+
+	if rel == "." {
+		return filepath.Join(completedDir, filepath.Base(filename))
+	}
+	return filepath.Join(completedDir, rel, filepath.Base(filename))
 }
 
 // CreateNewFile creates a new file for the channel using the given filename and extension.
@@ -331,7 +371,7 @@ func (ch *Channel) finalizeRecording(filename string, recordedDuration float64, 
 			
 			// Only create database folders and log after successful upload
 			// Store in GitHub Actions database (JSON files) - creates folders only on success
-			if err := ch.logUploadToDatabase(finalPath, downloadLink, recordedDuration, recordedFilesize); err != nil {
+			if err := ch.logUploadToDatabase(finalPath, downloadLink, "", "", "", "", recordedDuration, recordedFilesize); err != nil {
 				ch.Error("failed to log upload to GitHub Actions database: %s", err.Error())
 			} else {
 				ch.Info("upload logged to GitHub Actions database")
@@ -359,13 +399,21 @@ func (ch *Channel) finalizeRecording(filename string, recordedDuration float64, 
 		}
 	}
 
+	// Smart strategy: file was written directly into completedDir, no move needed.
+	// Only fall back to moveRecordingToDir if the file ended up outside completedDir.
 	completedDir := completedDirForChannel(ch)
 	if completedDir != "" {
-		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
-		if err != nil {
-			ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+		cleanCompleted := filepath.Clean(completedDir)
+		cleanFinal := filepath.Clean(filepath.Dir(finalPath))
+		if cleanFinal != cleanCompleted {
+			dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
+			if err != nil {
+				ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+			} else {
+				ch.Info("completed recording moved to `%s`", dst)
+			}
 		} else {
-			ch.Info("completed recording moved to `%s`", dst)
+			ch.Info("recording already in completed dir: `%s`", filepath.Base(finalPath))
 		}
 	}
 
@@ -449,7 +497,7 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 			} else {
 				// Upload thumbnail to Catbox.moe (supports adult content, permanent hosting)
 				ch.Info("uploading thumbnail to Catbox.moe...")
-				thumbnailUploader := uploader.NewThumbnailUploader()
+				thumbnailUploader := uploader.NewThumbnailUploader(server.Config.ImgBBAPIKey)
 				uploadedURL, err := thumbnailUploader.Upload(tempThumbPath)
 				if err != nil {
 					ch.Error("thumbnail upload failed: %s", err.Error())
@@ -463,13 +511,25 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 				}
 			}
 			
+			// Extract links by host for database logging
+			var gofileLink, turboviplayLink, voesxLink, streamtapeLink string
+			for _, result := range successfulUploads {
+				switch result.Host {
+				case "GoFile":
+					gofileLink = result.DownloadLink
+				case "TurboViPlay":
+					turboviplayLink = result.DownloadLink
+				case "VOE.sx":
+					voesxLink = result.DownloadLink
+				case "Streamtape":
+					streamtapeLink = result.DownloadLink
+				}
+			}
+
 			// Store all successful upload links in database
-			// Use the first successful link as primary, store others as alternates
-			primaryLink := successfulUploads[0].DownloadLink
-			
 			// Only create database folders and log after successful upload
 			// Store in GitHub Actions database (JSON files) - creates folders only on success
-			if err := ch.logUploadToDatabase(finalPath, primaryLink, recordedDuration, recordedFilesize); err != nil {
+			if err := ch.logUploadToDatabase(finalPath, gofileLink, turboviplayLink, voesxLink, streamtapeLink, thumbnailLink, recordedDuration, recordedFilesize); err != nil {
 				ch.Error("failed to log upload to GitHub Actions database: %s", err.Error())
 			} else {
 				ch.Info("upload logged to GitHub Actions database")
@@ -478,21 +538,6 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 			// Store upload records in Supabase only when enabled.
 			if server.Config.EnableSupabase && server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
 				supabaseClient := supabase.NewClient(server.Config.SupabaseURL, server.Config.SupabaseAPIKey)
-				
-				// Extract links by host
-				var gofileLink, turboviplayLink, voesxLink, streamtapeLink string
-				for _, result := range successfulUploads {
-					switch result.Host {
-					case "GoFile":
-						gofileLink = result.DownloadLink
-					case "TurboViPlay":
-						turboviplayLink = result.DownloadLink
-					case "VOE.sx":
-						voesxLink = result.DownloadLink
-					case "Streamtape":
-						streamtapeLink = result.DownloadLink
-					}
-				}
 				
 				// Store single record with all links
 				if err := supabaseClient.InsertMultiHostUploadRecord(
@@ -523,14 +568,22 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 		}
 	}
 
-	// If upload is disabled, move to completed directory
+	// Smart strategy: file was written directly into completedDir, no move needed.
+	// Only fall back to moveRecordingToDir if the file ended up outside completedDir
+	// (e.g. upload was toggled mid-session or completedDir changed).
 	completedDir := completedDirForChannel(ch)
 	if completedDir != "" {
-		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
-		if err != nil {
-			ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+		cleanCompleted := filepath.Clean(completedDir)
+		cleanFinal := filepath.Clean(filepath.Dir(finalPath))
+		if cleanFinal != cleanCompleted {
+			dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
+			if err != nil {
+				ch.Error("move completed recording `%s`: %s", finalPath, err.Error())
+			} else {
+				ch.Info("completed recording moved to `%s`", dst)
+			}
 		} else {
-			ch.Info("completed recording moved to `%s`", dst)
+			ch.Info("recording already in completed dir: `%s`", filepath.Base(finalPath))
 		}
 	}
 
@@ -618,11 +671,16 @@ func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {
 	args := []string{"-nostdin", "-y", "-i", filename}
 	switch server.Config.FinalizeMode {
 	case "remux":
+		// Fix negative/discontinuous timestamps common in HLS .ts recordings
+		args = append(args, "-avoid_negative_ts", "make_zero")
 		args = append(args, "-c", "copy")
 		if outExt == ".mp4" {
+			// +faststart moves moov atom to front for instant web playback
 			args = append(args, "-movflags", "+faststart")
 		}
 	case "transcode":
+		// Fix negative/discontinuous timestamps common in HLS .ts recordings
+		args = append(args, "-avoid_negative_ts", "make_zero")
 		encoder := strings.TrimSpace(server.Config.FFmpegEncoder)
 		if encoder == "" {
 			encoder = "libx264"
@@ -632,8 +690,10 @@ func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {
 		if preset := strings.TrimSpace(server.Config.FFmpegPreset); preset != "" {
 			args = append(args, "-preset", preset)
 		}
-		args = append(args, "-c:a", "copy")
+		// Re-encode audio to AAC for maximum compatibility; copy if already AAC
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ar", "48000")
 		if outExt == ".mp4" {
+			// +faststart moves moov atom to front for instant web playback
 			args = append(args, "-movflags", "+faststart")
 		}
 	default:
@@ -667,6 +727,8 @@ func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {
 
 func qualityArgsForEncoder(encoder string, quality int) []string {
 	if quality <= 0 {
+		// CRF 23 is the libx264 default; good balance of quality vs size for streaming content.
+		// Lower = better quality but larger file. Range: 18 (near-lossless) to 28 (acceptable).
 		quality = 23
 	}
 	lower := strings.ToLower(strings.TrimSpace(encoder))
@@ -682,10 +744,10 @@ func qualityArgsForEncoder(encoder string, quality int) []string {
 
 // logUploadToDatabase stores upload record in local JSON database (GitHub Actions compatible)
 // This function only creates folders and files after a successful GoFile upload
-func (ch *Channel) logUploadToDatabase(filePath, gofileLink string, recordedDuration float64, recordedFilesize int64) error {
+func (ch *Channel) logUploadToDatabase(filePath, gofileLink, turboviplayLink, voesxLink, streamtapeLink, thumbnailLink string, recordedDuration float64, recordedFilesize int64) error {
 	// Validate inputs before creating any folders
-	if gofileLink == "" {
-		return fmt.Errorf("gofile link is empty, cannot log to database")
+	if gofileLink == "" && turboviplayLink == "" && voesxLink == "" && streamtapeLink == "" {
+		return fmt.Errorf("all upload links are empty, cannot log to database")
 	}
 	
 	// Get file info before creating database structure
@@ -716,11 +778,15 @@ func (ch *Channel) logUploadToDatabase(filePath, gofileLink string, recordedDura
 		"username":       ch.Config.Username,
 		"site":           ch.Config.Site,
 		"filename":       filepath.Base(filePath),
-		"gofile_link":    gofileLink,
-		"uploaded_at":    time.Now().UTC().Format(time.RFC3339),
-		"filesize_bytes": fileSize,
-		"status":         "uploaded",
-		"duration_seconds": recordedDuration,
+		"gofile_link":       gofileLink,
+		"turboviplay_link":  turboviplayLink,
+		"voesx_link":        voesxLink,
+		"streamtape_link":   streamtapeLink,
+		"thumbnail_link":    thumbnailLink,
+		"uploaded_at":       time.Now().UTC().Format(time.RFC3339),
+		"filesize_bytes":    fileSize,
+		"status":            "uploaded",
+		"duration_seconds":  recordedDuration,
 	}
 	
 	// Read existing data or create new structure
@@ -873,8 +939,8 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 		return
 	}
 	
-	// Calculate approximate duration (assuming ~1MB per second for 1080p)
-	approximateDuration := float64(fileInfo.Size()) / (1024 * 1024) // rough estimate
+	// Duration is unknown for orphaned files; use 0 rather than a misleading estimate.
+	var approximateDuration float64
 	
 	ch.Info("orphaned file size: %.2f MB", float64(fileInfo.Size())/(1024*1024))
 	
@@ -949,7 +1015,7 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 			} else {
 				// Upload thumbnail to Catbox.moe
 				ch.Info("uploading thumbnail to Catbox.moe...")
-				thumbnailUploader := uploader.NewThumbnailUploader()
+				thumbnailUploader := uploader.NewThumbnailUploader(server.Config.ImgBBAPIKey)
 				uploadedURL, err := thumbnailUploader.Upload(tempThumbPath)
 				if err != nil {
 					ch.Error("thumbnail upload failed: %s", err.Error())
@@ -962,10 +1028,24 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 			}
 			
 			// Store all successful upload links in database
-			primaryLink := successfulUploads[0].DownloadLink
-			
+
+			// Extract links by host for database logging
+			var gofileLink, turboviplayLink, voesxLink, streamtapeLink string
+			for _, result := range successfulUploads {
+				switch result.Host {
+				case "GoFile":
+					gofileLink = result.DownloadLink
+				case "TurboViPlay":
+					turboviplayLink = result.DownloadLink
+				case "VOE.sx":
+					voesxLink = result.DownloadLink
+				case "Streamtape":
+					streamtapeLink = result.DownloadLink
+				}
+			}
+
 			// Store in GitHub Actions database (JSON files)
-			if err := ch.logUploadToDatabase(finalPath, primaryLink, approximateDuration, fileInfo.Size()); err != nil {
+			if err := ch.logUploadToDatabase(finalPath, gofileLink, turboviplayLink, voesxLink, streamtapeLink, thumbnailLink, approximateDuration, fileInfo.Size()); err != nil {
 				ch.Error("failed to log upload to GitHub Actions database: %s", err.Error())
 			} else {
 				ch.Info("upload logged to GitHub Actions database")
@@ -974,23 +1054,7 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 			// Store upload records in Supabase if enabled
 			if server.Config.EnableSupabase && server.Config.SupabaseURL != "" && server.Config.SupabaseAPIKey != "" {
 				supabaseClient := supabase.NewClient(server.Config.SupabaseURL, server.Config.SupabaseAPIKey)
-				
-				// Extract links by host
-				var gofileLink, turboviplayLink, voesxLink, streamtapeLink string
-				for _, result := range successfulUploads {
-					switch result.Host {
-					case "GoFile":
-						gofileLink = result.DownloadLink
-					case "TurboViPlay":
-						turboviplayLink = result.DownloadLink
-					case "VOE.sx":
-						voesxLink = result.DownloadLink
-					case "Streamtape":
-						streamtapeLink = result.DownloadLink
-					}
-				}
-				
-				// Store single record with all links
+				// Store single record with all links (reuse vars from outer scope)
 				if err := supabaseClient.InsertMultiHostUploadRecord(
 					ch.Config.Username,
 					filepath.Base(finalPath),
@@ -1019,14 +1083,21 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 		}
 	}
 	
-	// If upload is disabled, move to completed directory
+	// Smart strategy: file was written directly into completedDir, no move needed.
+	// Only fall back to moveRecordingToDir if the file ended up outside completedDir.
 	completedDir := completedDirForChannel(ch)
 	if completedDir != "" {
-		dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
-		if err != nil {
-			ch.Error("move orphaned recording `%s`: %s", finalPath, err.Error())
+		cleanCompleted := filepath.Clean(completedDir)
+		cleanFinal := filepath.Clean(filepath.Dir(finalPath))
+		if cleanFinal != cleanCompleted {
+			dst, err := moveRecordingToDir(finalPath, recordingDirFromPattern(ch.Config.Pattern), completedDir)
+			if err != nil {
+				ch.Error("move orphaned recording `%s`: %s", finalPath, err.Error())
+			} else {
+				ch.Info("orphaned recording moved to `%s`", dst)
+			}
 		} else {
-			ch.Info("orphaned recording moved to `%s`", dst)
+			ch.Info("orphaned recording already in completed dir: `%s`", filepath.Base(finalPath))
 		}
 	}
 	
