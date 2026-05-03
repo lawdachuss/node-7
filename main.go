@@ -109,7 +109,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "finalize-mode",
 				Usage: "Post-process closed recordings: none, remux, or transcode",
-				Value: "none",
+				Value: "remux",
 			},
 			&cli.StringFlag{
 				Name:  "ffmpeg-encoder",

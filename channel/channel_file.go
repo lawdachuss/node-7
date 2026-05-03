@@ -514,6 +514,7 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 			}
 
 			// Store upload records in Supabase (primary storage)
+			dbSuccess := false
 			if server.SupabaseClient != nil {
 				ch.Info("💾 storing upload record in Supabase...")
 				
@@ -533,9 +534,11 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 						ch.Error("❌ failed to log upload to local database: %s", err.Error())
 					} else {
 						ch.Info("✓ upload logged to local database (fallback)")
+						dbSuccess = true
 					}
 				} else {
 					ch.Info("✓ upload record stored in Supabase (%d hosts)", len(successfulUploads))
+					dbSuccess = true
 				}
 			} else {
 				// No Supabase client — use local database
@@ -544,15 +547,20 @@ func (ch *Channel) finalizeRecordingAsync(filename string, recordedDuration floa
 					ch.Error("❌ failed to log upload to local database: %s", err.Error())
 				} else {
 					ch.Info("✓ upload logged to local database")
+					dbSuccess = true
 				}
 			}
 			
 			// Step 3: Delete local file only after successful upload and database logging
-			ch.Info("🗑️  deleting local file `%s`...", filepath.Base(finalPath))
-			if err := os.Remove(finalPath); err != nil {
-				ch.Error("❌ failed to delete local file `%s`: %s", finalPath, err.Error())
+			if dbSuccess {
+				ch.Info("🗑️  deleting local file `%s`...", filepath.Base(finalPath))
+				if err := os.Remove(finalPath); err != nil {
+					ch.Error("❌ failed to delete local file `%s`: %s", finalPath, err.Error())
+				} else {
+					ch.Info("✓ local file deleted successfully")
+				}
 			} else {
-				ch.Info("✓ local file deleted successfully")
+				ch.Error("❌ CRITICAL: upload succeeded but database logging failed. Keeping local file to prevent data loss.")
 			}
 			
 			go ch.ScanTotalDiskUsage()
@@ -704,6 +712,13 @@ func (ch *Channel) runFFmpegFinalizer(filename string) (string, error) {
 		}
 		return "", fmt.Errorf("%s", msg)
 	}
+
+	// Verify FFmpeg didn't fail silently by producing a 0-byte file
+	if stat, statErr := os.Stat(tempOutput); statErr == nil && stat.Size() == 0 {
+		_ = os.Remove(tempOutput)
+		return "", fmt.Errorf("ffmpeg produced a 0-byte file (silent failure)")
+	}
+
 	if finalPath == filename {
 		if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
 			_ = os.Remove(tempOutput)
@@ -1103,6 +1118,7 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 			}
 
 			// Store in Supabase (primary) or local database (fallback)
+			dbSuccess := false
 			if server.SupabaseClient != nil {
 				ch.Info("storing orphaned file upload record in Supabase...")
 				if err := server.SupabaseClient.InsertMultiHostUploadRecord(
@@ -1120,9 +1136,11 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 						ch.Error("failed to log upload to local database: %s", err.Error())
 					} else {
 						ch.Info("upload logged to local database (fallback)")
+						dbSuccess = true
 					}
 				} else {
 					ch.Info("✓ orphaned file upload record stored in Supabase (%d hosts)", len(successfulUploads))
+					dbSuccess = true
 				}
 			} else {
 				// No Supabase client — use local database
@@ -1130,15 +1148,20 @@ func (ch *Channel) ProcessOrphanedFile(filePath string) {
 					ch.Error("failed to log upload to local database: %s", err.Error())
 				} else {
 					ch.Info("upload logged to local database")
+					dbSuccess = true
 				}
 			}
 			
 			// Step 3: Delete local file after successful upload
-			ch.Info("deleting local orphaned file `%s`...", filepath.Base(finalPath))
-			if err := os.Remove(finalPath); err != nil {
-				ch.Error("failed to delete local file `%s`: %s", finalPath, err.Error())
+			if dbSuccess {
+				ch.Info("deleting local orphaned file `%s`...", filepath.Base(finalPath))
+				if err := os.Remove(finalPath); err != nil {
+					ch.Error("failed to delete local file `%s`: %s", finalPath, err.Error())
+				} else {
+					ch.Info("local orphaned file deleted successfully")
+				}
 			} else {
-				ch.Info("local orphaned file deleted successfully")
+				ch.Error("CRITICAL: upload succeeded but database logging failed. Keeping orphaned file.")
 			}
 			
 			go ch.ScanTotalDiskUsage()
