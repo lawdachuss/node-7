@@ -23,6 +23,11 @@ jobs:
   record:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6h — 1h buffer over 5h recording
+    
+    # Add resource limits to prevent runner starvation
+    env:
+      DOCKER_BUILDKIT: 1
+      COMPOSE_DOCKER_CLI_BUILD: 1
 
     steps:
       - name: Checkout code
@@ -370,8 +375,13 @@ jobs:
           fi
 
           # Monitor tunnel health and recreate if it becomes inaccessible
+          # Store the monitoring PID so we can kill it later
           (
-            while true; do
+            DURATION_HOURS="${{ github.event.inputs.duration_hours }}"
+            DURATION_HOURS="${DURATION_HOURS:-5}"
+            MONITOR_END_TIME=$(($(date +%s) + DURATION_HOURS * 3600 + 300))  # Add 5 min buffer
+            
+            while [ $(date +%s) -lt $MONITOR_END_TIME ]; do
               sleep 120  # Check every 2 minutes
               
               # Check if process is alive
@@ -420,7 +430,11 @@ jobs:
                 fi
               fi
             done
+            echo "✅ Tunnel monitor exiting gracefully (time limit reached)"
           ) &
+          MONITOR_PID=$!
+          echo $MONITOR_PID > tunnel_monitor.pid
+          echo "Tunnel monitor PID: $MONITOR_PID"
 
       - name: Fallback to ngrok if Cloudflare fails
         if: steps.cloudflare_tunnel.outcome == 'failure'
@@ -518,6 +532,14 @@ jobs:
       - name: Record for 5 hours
         run: |
           graceful_shutdown() {
+            echo "⚠️  Graceful shutdown initiated..."
+            
+            # Kill background processes first
+            if [ -f tunnel_monitor.pid ]; then
+              MONITOR_PID=$(cat tunnel_monitor.pid)
+              kill $MONITOR_PID 2>/dev/null || true
+            fi
+            
             echo "⚠️  Saving recordings..."
             docker exec goondvr pkill -SIGTERM -f goondvr 2>/dev/null || true
             sleep 180
@@ -542,13 +564,23 @@ jobs:
           END_TIME=$(($(date +%s) + DURATION_HOURS * 3600))
           LAST_CLEANUP=0
           LAST_HEARTBEAT=0
+          RESTART_COUNT=0
+          MAX_RESTARTS=3
 
           while [ $(date +%s) -lt $END_TIME ] && [ "$CANCELLED" = false ]; do
             # Check if container is still running
             if ! docker ps --format '{{.Names}}' | grep -q '^goondvr$'; then
               echo "⚠️  Container stopped unexpectedly!"
               docker logs --tail 100 goondvr
-              echo "⚠️  Attempting to restart container..."
+              
+              # Check restart limit
+              if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
+                echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached, exiting"
+                break
+              fi
+              
+              RESTART_COUNT=$((RESTART_COUNT + 1))
+              echo "⚠️  Attempting to restart container (attempt $RESTART_COUNT/$MAX_RESTARTS)..."
               
               # Try to restart the container
               docker start goondvr 2>/dev/null || {
@@ -571,6 +603,14 @@ jobs:
             fi
 
             CURRENT_TIME=$(date +%s)
+            
+            # Monitor system resources
+            MEMORY_USED=$(free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
+            if [ "$MEMORY_USED" -gt 90 ]; then
+              echo "⚠️  Memory usage critical: ${MEMORY_USED}%"
+              echo "Running emergency cleanup..."
+              docker system prune -f 2>/dev/null || true
+            fi
 
             # Disk space guard — upload early if >80% used
             DISK_USED=$(df / | awk 'NR==2{print $5}' | tr -d '%')
@@ -596,7 +636,7 @@ jobs:
                 -H "apikey: ${{ secrets.SUPABASE_API_KEY }}" \
                 -H "Content-Type: application/json" \
                 -H "Prefer: return=minimal" \
-                -d "{\"run_id\": ${{ github.run_number }}, \"timestamp\": \"$(date -u +%FT%TZ)\", \"tunnel_url\": \"$TUNNEL_URL\", \"disk_used_pct\": $DISK_USED}" \
+                -d "{\"run_id\": ${{ github.run_number }}, \"timestamp\": \"$(date -u +%FT%TZ)\", \"tunnel_url\": \"$TUNNEL_URL\", \"disk_used_pct\": $DISK_USED, \"memory_used_pct\": $MEMORY_USED}" \
                 > /dev/null 2>&1 || true
               LAST_HEARTBEAT=$CURRENT_TIME
             fi
@@ -639,12 +679,40 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          echo "🧹 Starting cleanup..."
+          
+          # Kill tunnel monitor first
+          if [ -f tunnel_monitor.pid ]; then
+            MONITOR_PID=$(cat tunnel_monitor.pid)
+            echo "Stopping tunnel monitor (PID: $MONITOR_PID)..."
+            kill $MONITOR_PID 2>/dev/null || true
+            sleep 2
+          fi
+          
+          # Kill tunnel process
+          if [ -f tunnel.pid ]; then
+            TUNNEL_PID=$(cat tunnel.pid)
+            echo "Stopping tunnel (PID: $TUNNEL_PID)..."
+            kill $TUNNEL_PID 2>/dev/null || true
+          fi
+          pkill -f cloudflared 2>/dev/null || true
+          pkill -f ngrok 2>/dev/null || true
+          
+          # Stop Docker containers gracefully
+          echo "Stopping Docker containers..."
           docker stop --time=60 goondvr byparr 2>/dev/null || true
           docker rm -f goondvr byparr 2>/dev/null || true
           docker network rm recorder-network 2>/dev/null || true
+          
+          # Clean up Docker resources
+          echo "Cleaning up Docker resources..."
           docker system prune -af --volumes 2>/dev/null || true
-          pkill -f cloudflared 2>/dev/null || true
+          
+          # Clean up files
+          echo "Cleaning up files..."
           rm -rf videos/* database/* 2>/dev/null || true
+          
+          echo "✅ Cleanup complete"
 
       - name: Upload artifacts (emergency fallback)
         if: always()
