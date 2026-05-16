@@ -15,6 +15,7 @@ import (
         "github.com/teacat/chaturbate-dvr/channel"
         "github.com/teacat/chaturbate-dvr/entity"
         "github.com/teacat/chaturbate-dvr/router/view"
+        "github.com/teacat/chaturbate-dvr/server"
 )
 
 // Manager is responsible for managing channels and their states.
@@ -62,6 +63,13 @@ func (m *Manager) SaveConfig() error {
 // LoadConfig loads the channels from JSON and starts them.
 // All channels are automatically resumed on startup, regardless of their paused state.
 func (m *Manager) LoadConfig() error {
+        // Restore persisted cookies/user-agent before starting channels
+        if err := server.LoadSettings(); err != nil {
+                fmt.Printf("[WARN] could not load settings: %v\n", err)
+        } else if server.Config.Cookies != "" {
+                fmt.Println(" INFO loaded persisted cookies from conf/settings.json")
+        }
+
         b, err := os.ReadFile("./conf/channels.json")
         if os.IsNotExist(err) {
                 return nil
