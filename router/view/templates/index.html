@@ -220,6 +220,11 @@
                         <textarea name="user_agent" rows="4" class="w-full bg-white dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 rounded-lg px-3 py-2 text-sm dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent resize-none">{{ .Config.UserAgent }}</textarea>
                         <p class="text-xs text-zinc-400 mt-1">User-Agent can be found using tools like <a class="text-blue-600 hover:text-blue-500 underline" href="https://www.whatismybrowser.com/detect/what-is-my-user-agent/" target="_blank">WhatIsMyBrowser</a>.</p>
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-1.5">Byparr / FlareSolverr URL</label>
+                        <input type="text" name="byparr_url" placeholder="http://localhost:8191/v1" value="{{ .Config.ByparrURL }}" class="w-full bg-white dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 rounded-lg px-3 py-2 text-sm dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-400 focus:border-transparent" />
+                        <p class="text-xs text-zinc-400 mt-1">Leave blank to use the default <code class="font-mono">http://localhost:8191/v1</code>. Required if Byparr runs at a different address.</p>
+                    </div>
                 </div>
                 <div class="flex items-center gap-2 px-6 py-3 bg-emerald-50 dark:bg-emerald-900/20 border-t border-zinc-100 dark:border-zinc-700 text-xs text-emerald-700 dark:text-emerald-400">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>

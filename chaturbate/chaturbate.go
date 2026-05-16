@@ -7,7 +7,6 @@ import (
         "fmt"
         "math/rand"
         "net/url"
-        "os"
         "regexp"
         "strconv"
         "strings"
@@ -88,10 +87,6 @@ func fetchAPIResponse(ctx context.Context, client *internal.Req, username string
 // tryFlareSolverrStream uses Byparr/FlareSolverr to obtain cookies and the HLS URL.
 // Used when Cloudflare blocks direct API access or when the room is live but no stream URL is returned.
 func tryFlareSolverrStream(ctx context.Context, username, reason string) (*Stream, string, error) {
-        if os.Getenv("FLARESOLVERR_URL") == "" {
-                return nil, "", fmt.Errorf("FLARESOLVERR_URL not configured")
-        }
-
         fmt.Printf("[INFO] %s for %s, trying FlareSolverr/Byparr fallback...\n", reason, username)
 
         attemptCtx, cancel := context.WithTimeout(ctx, 250*time.Second)

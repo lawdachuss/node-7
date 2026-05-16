@@ -14,14 +14,16 @@ import (
         "github.com/teacat/chaturbate-dvr/server"
 )
 
-// getFlareSolverrURL returns the FlareSolverr/Byparr URL
-// Supports both load-balanced (byparr-lb) and direct instances
+// getFlareSolverrURL returns the FlareSolverr/Byparr URL.
+// Priority: UI-configured value (server.Config.ByparrURL) > FLARESOLVERR_URL env var > localhost default.
 func getFlareSolverrURL() string {
-        baseURL := os.Getenv("FLARESOLVERR_URL")
-        if baseURL == "" {
-                baseURL = "http://localhost:8191/v1"
+        if server.Config != nil && server.Config.ByparrURL != "" {
+                return server.Config.ByparrURL
         }
-        return baseURL
+        if baseURL := os.Getenv("FLARESOLVERR_URL"); baseURL != "" {
+                return baseURL
+        }
+        return "http://localhost:8191/v1"
 }
 
 type flareSolverrRequest struct {
@@ -219,12 +221,15 @@ func FetchStreamViaFlareSolverr(ctx context.Context, username string) (string, s
                 return "", "", fmt.Errorf("get fresh cookies: %w", err)
         }
 
-        // Step 2: Update server config with fresh cookies and user agent
+        // Step 2: Update server config with fresh cookies and user agent, then persist
         if cookies != "" {
                 server.Config.Cookies = cookies
         }
         if userAgent != "" {
                 server.Config.UserAgent = userAgent
+        }
+        if err := server.SaveSettings(); err != nil {
+                fmt.Printf("[WARN] could not persist byparr cookies: %v\n", err)
         }
 
         // Step 3: POST API with Byparr cookies (csrftoken must match cookie header).

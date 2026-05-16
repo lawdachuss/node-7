@@ -116,6 +116,7 @@ func Updates(c *gin.Context) {
 type UpdateConfigRequest struct {
         Cookies   string `json:"cookies" form:"cookies"`
         UserAgent string `json:"user_agent" form:"user_agent"`
+        ByparrURL string `json:"byparr_url" form:"byparr_url"`
 }
 
 // UpdateConfig updates the server configuration (form from Web UI or JSON from cookie-refresher).
@@ -132,6 +133,7 @@ func UpdateConfig(c *gin.Context) {
         if req.UserAgent != "" {
                 server.Config.UserAgent = req.UserAgent
         }
+        server.Config.ByparrURL = req.ByparrURL
 
         if err := server.SaveSettings(); err != nil {
                 fmt.Printf("[WARN] could not save settings: %v\n", err)
