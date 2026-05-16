@@ -86,7 +86,9 @@ def get_embed_url(host_name, link):
         return f'https://voe.sx/e/{code}' if code else ''
     if host_name == 'Byse':
         code = link.rsplit('/', 1)[-1]
-        return f'https://byse.sx/e/{code}' if code else ''
+        return f'https://api.byse.sx/e/{code}' if code else ''
+    if host_name == 'SendCM':
+        return link
     return ''
 
 def add_recording(db, filename, links, resolution='', framerate=0,
@@ -171,6 +173,119 @@ def mux_pair(video_path, audio_path, output_path):
         return False
     log.info(f'Mux OK: {Path(output_path).name}')
     return True
+
+def upload_catbox(filepath):
+    try:
+        with open(filepath, 'rb') as fh:
+            r = requests.post(
+                'https://catbox.moe/user/api.php',
+                data={'reqtype': 'fileupload'},
+                files={'fileToUpload': (os.path.basename(filepath), fh)},
+                timeout=(15, 120),
+            )
+        if r.status_code == 200 and r.text.startswith('http'):
+            return r.text.strip()
+        log.warning(f'Catbox upload failed: HTTP {r.status_code} {r.text[:120]}')
+    except Exception as e:
+        log.warning(f'Catbox upload failed: {e}')
+    return ''
+
+def write_sidecar(path, value):
+    if value:
+        with open(path, 'w') as f:
+            f.write(value)
+
+def probe_duration(filepath):
+    try:
+        result = subprocess.run([
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', filepath
+        ], capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            duration = float(result.stdout.strip() or '0')
+            if duration > 1:
+                return duration
+    except Exception as e:
+        log.info(f'Preview duration probe failed for {Path(filepath).name}: {e}')
+    return 30.0
+
+def ensure_preview_sidecars(filepath):
+    ext = Path(filepath).suffix.lower()
+    if ext not in ('.mp4', '.mkv'):
+        return
+
+    name = Path(filepath).name
+    thumb_sidecar = filepath + '.thumb'
+    sprite_sidecar = filepath + '.sprite'
+
+    if not os.path.isfile(thumb_sidecar):
+        tmp_thumb = filepath + '.tmp_thumb.jpg'
+        try:
+            result = subprocess.run([
+                'ffmpeg', '-y', '-i', filepath, '-ss', '00:00:05',
+                '-vframes', '1', '-s', '320x180', '-q:v', '3', tmp_thumb
+            ], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and os.path.isfile(tmp_thumb):
+                url = upload_catbox(tmp_thumb)
+                write_sidecar(thumb_sidecar, url)
+                if url:
+                    log.info(f'Thumbnail saved for {name}')
+            else:
+                log.info(f'Thumbnail extract failed for {name}: {result.stderr[-200:]}')
+        except Exception as e:
+            log.info(f'Thumbnail extract failed for {name}: {e}')
+        finally:
+            if os.path.isfile(tmp_thumb):
+                os.remove(tmp_thumb)
+
+    if not os.path.isfile(sprite_sidecar):
+        frame_count = 10
+        duration = probe_duration(filepath)
+        interval = duration / frame_count
+        tmp_dir = filepath + '.sprite_frames'
+        tmp_sprite = filepath + '.tmp_sprite.jpg'
+        os.makedirs(tmp_dir, exist_ok=True)
+        try:
+            ok = True
+            for i in range(frame_count):
+                frame_path = os.path.join(tmp_dir, f'f_{i:02d}.jpg')
+                result = subprocess.run([
+                    'ffmpeg', '-y', '-ss', f'{i * interval:.1f}', '-i', filepath,
+                    '-vframes', '1', '-s', '320x180', '-q:v', '3', frame_path
+                ], capture_output=True, text=True, timeout=30)
+                if result.returncode != 0 or not os.path.isfile(frame_path):
+                    log.info(f'Sprite frame {i + 1}/{frame_count} failed for {name}: {result.stderr[-200:]}')
+                    ok = False
+                    break
+            if ok:
+                args = ['ffmpeg', '-y']
+                for i in range(frame_count):
+                    args += ['-i', os.path.join(tmp_dir, f'f_{i:02d}.jpg')]
+                args += ['-filter_complex', f'hstack=inputs={frame_count}',
+                         '-frames:v', '1', '-q:v', '3', tmp_sprite]
+                result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0 and os.path.isfile(tmp_sprite):
+                    url = upload_catbox(tmp_sprite)
+                    write_sidecar(sprite_sidecar, url)
+                    if url:
+                        log.info(f'Sprite saved for {name}')
+                else:
+                    log.info(f'Sprite tile failed for {name}: {result.stderr[-200:]}')
+        except Exception as e:
+            log.info(f'Sprite generation failed for {name}: {e}')
+        finally:
+            if os.path.isfile(tmp_sprite):
+                os.remove(tmp_sprite)
+            if os.path.isdir(tmp_dir):
+                for frame in os.listdir(tmp_dir):
+                    try:
+                        os.remove(os.path.join(tmp_dir, frame))
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(tmp_dir)
+                except OSError:
+                    pass
 
 def upload_gofile(filepath):
     name = os.path.basename(filepath)
@@ -426,9 +541,14 @@ def process_file(f, upload_dir, db):
     all_files = os.listdir(upload_dir)
 
     if Path(f).stem.endswith('.audio'):
-        os.remove(filepath)
-        cleanup_sidecars(filepath)
-        log.info(f'Deleted orphaned audio: {f}')
+        base = Path(f).stem.replace('.audio', '')
+        has_video = any(Path(af).stem == base + '.video' for af in all_files)
+        if not has_video:
+            os.remove(filepath)
+            cleanup_sidecars(filepath)
+            log.info(f'Deleted orphaned audio: {f}')
+        else:
+            log.info(f'Skipping audio {f}, waiting for matching video')
         return
 
     if Path(f).stem.endswith('.video'):
@@ -439,12 +559,15 @@ def process_file(f, upload_dir, db):
             muxed_name = base + '.mp4'
             muxed_path = os.path.join(upload_dir, muxed_name)
             if mux_pair(filepath, audio_path, muxed_path):
-                os.remove(filepath)
-                cleanup_sidecars(filepath)
-                os.remove(audio_path)
-                cleanup_sidecars(audio_path)
-                log.info(f'Deleted originals after mux: {f}, {audio_file}')
                 process_file(muxed_name, upload_dir, db)
+                if not os.path.isfile(muxed_path):
+                    os.remove(filepath)
+                    cleanup_sidecars(filepath)
+                    os.remove(audio_path)
+                    cleanup_sidecars(audio_path)
+                    log.info(f'Deleted originals after mux upload: {f}, {audio_file}')
+                else:
+                    log.info(f'Upload failed, keeping originals: {f}, {audio_file}')
                 return
         label = 'orphaned video (no audio)'
     else:
@@ -454,6 +577,8 @@ def process_file(f, upload_dir, db):
     chan = db['channels'].get(username, {})
     if any(r['filename'] == f for r in chan.get('recordings', [])):
         return
+
+    ensure_preview_sidecars(filepath)
 
     # Read sidecar URLs before they're deleted
     thumb_url = sprite_url = ''
@@ -477,7 +602,7 @@ def process_file(f, upload_dir, db):
     results = upload_file(filepath)
     if results:
         embed_url = ''
-        for host in ('Streamtape', 'VoeSX', 'Byse'):
+        for host in ('Streamtape', 'VoeSX', 'Byse', 'SendCM'):
             if host in results:
                 eu = get_embed_url(host, results[host])
                 if eu:

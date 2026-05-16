@@ -200,6 +200,15 @@ func loadRecordings() *RecordingsDB {
 	return &db
 }
 
+func saveRecordings(db *RecordingsDB) {
+	data, err := json.MarshalIndent(db, "", "  ")
+	if err != nil {
+		return
+	}
+	os.MkdirAll("/database", 0777)
+	os.WriteFile("/database/recordings.json", data, 0644)
+}
+
 func walkDir(dir string) []*VideoEntry {
 	var entries []*VideoEntry
 	entries, _ = collectVideos(dir, entries)

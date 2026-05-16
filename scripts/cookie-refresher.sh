@@ -1,11 +1,16 @@
 #!/bin/sh
 apk add --no-cache curl jq
 echo '[COOKIE] Starting Cloudflare cookie refresher...'
+until curl -fsS --max-time 5 http://byparr-lb/backend-health > /dev/null 2>&1; do
+  echo '[COOKIE] Waiting for Byparr backend...'
+  sleep 5
+done
+
 while true; do
   echo '[COOKIE] Getting cf_clearance from Byparr...'
-  RESPONSE=$(curl -s --max-time 120 -X POST http://byparr:8191/v1 \
+  RESPONSE=$(curl -sS --fail --retry 3 --retry-all-errors --retry-delay 5 --max-time 240 -X POST http://byparr-lb/v1 \
     -H 'Content-Type: application/json' \
-    -d '{"cmd":"request.get","url":"https://chaturbate.com","maxTimeout":60000}')
+    -d '{"cmd":"request.get","url":"https://chaturbate.com","max_timeout":180}')
   CF_COOKIE=$(echo "$RESPONSE" | jq -r '.solution.cookies[] | select(.name=="cf_clearance") | .name + "=" + .value' 2>/dev/null)
   if [ -n "$CF_COOKIE" ]; then
     echo "[COOKIE] Refreshed cf_clearance"

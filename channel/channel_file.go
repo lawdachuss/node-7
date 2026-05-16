@@ -159,8 +159,7 @@ func muxOutputLooksValid(outputPath string, videoInfo, audioInfo os.FileInfo) (b
 // Errors are non-fatal: the recording is already safely written at srcPath.
 func (ch *Channel) MoveToOutputDir(srcPath string) string {
 	if server.Config == nil || server.Config.OutputDir == "" {
-		go ch.uploadFile(srcPath)
-		go ch.generateThumbnail(srcPath)
+		go ch.generatePreviewAndUpload(srcPath)
 		return srcPath
 	}
 
@@ -179,9 +178,13 @@ func (ch *Channel) MoveToOutputDir(srcPath string) string {
 		return srcPath
 	}
 	ch.Info("output-dir: moved %s -> %s", filepath.Base(srcPath), destPath)
-	go ch.uploadFile(destPath)
-	go ch.generateThumbnail(destPath)
+	go ch.generatePreviewAndUpload(destPath)
 	return destPath
+}
+
+func (ch *Channel) generatePreviewAndUpload(filePath string) {
+	ch.generateThumbnail(filePath)
+	ch.uploadFile(filePath)
 }
 
 // uniqueDestPath returns path if it does not exist, otherwise appends

@@ -1,8 +1,12 @@
 # Binaries
 goondvr
 goondvr.exe
+chaturbate-dvr
 bin/
 *.exe
+
+# Local build output
+.build/
 
 # Videos and recordings
 videos/*

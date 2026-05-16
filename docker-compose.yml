@@ -8,7 +8,7 @@
       - PROXY_SERVER=${PROXY_SERVER:-}
       - PROXY_USERNAME=${PROXY_USERNAME:-}
       - PROXY_PASSWORD=${PROXY_PASSWORD:-}
-      - TIMEOUT=180
+      - TIMEOUT=300
       - LOG_LEVEL=INFO
     restart: unless-stopped
     healthcheck:
@@ -50,7 +50,7 @@
 
   # Chaturbate DVR - Stream recorder (built from gogoqaz fork)
   chaturbate-dvr:
-    build: .build/chaturbate-dvr
+    build: .
     container_name: chaturbate-dvr
     command: ["--port", "8080", "--compress=false"]
     environment:

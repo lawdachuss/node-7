@@ -1,15 +1,19 @@
 package router
 
 import (
+	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +28,19 @@ type IndexData struct {
 	Channels []*entity.ChannelInfo
 	Disk     *entity.DiskInfo
 }
+
+type hostPlayer struct {
+	Host     string `json:"host"`
+	Link     string `json:"link"`
+	EmbedURL string `json:"embedUrl,omitempty"`
+	VideoURL string `json:"videoUrl,omitempty"`
+}
+
+var (
+	byseEmbedDomainMu        sync.RWMutex
+	byseEmbedDomain          string
+	byseEmbedDomainFetchedAt time.Time
+)
 
 // Index renders the index page with channel information.
 func Index(c *gin.Context) {
@@ -323,6 +340,9 @@ func VideoDetail(c *gin.Context) {
 					gender = chanData.Gender
 					filesize = rec.Filesize
 					embedURL = rec.EmbedURL
+					if strings.Contains(strings.ToLower(embedURL), "byse.sx/e/") {
+						embedURL = ""
+					}
 					dbThumbnailURL = rec.ThumbnailURL
 					dbSpriteURL = rec.SpriteURL
 					timestamp = rec.Timestamp
@@ -363,37 +383,32 @@ func VideoDetail(c *gin.Context) {
 		spriteURL = dbSpriteURL
 	}
 
+	byseAPIKey := ""
+	if server.Config != nil {
+		byseAPIKey = server.Config.ByseAPIKey
+	}
+	hostPlayers := buildHostPlayers(links, byseAPIKey)
+
 	// If embed URL is empty, try to generate one from upload links
 	if embedURL == "" {
-		for _, link := range links {
-			if strings.Contains(link, "byse.sx/") {
-				if code := extractFileCode(link); code != "" {
-					embedURL = "https://byse.sx/e/" + code
-					break
-				}
-			}
-			if strings.Contains(link, "streamtape.com/v/") {
-				if code := extractStreamtapeCode(link); code != "" {
-					embedURL = "https://streamtape.com/e/" + code
-					break
-				}
-			}
-			if strings.Contains(link, "voe.sx/") {
-				if code := extractFileCode(link); code != "" {
-					embedURL = "https://voe.sx/e/" + code
-					break
-				}
+		for _, player := range hostPlayers {
+			if player.EmbedURL != "" {
+				embedURL = player.EmbedURL
+				break
 			}
 		}
 	}
 
-	// Find a direct video URL from upload links (for native player)
+	hostPlayersJSON, _ := json.Marshal(hostPlayers)
+
+	// Find a direct video URL from upload links (for native player fallback).
 	videoURL := ""
-	if embedURL != "" {
-		videoURL = embedURL
-		// For byse, the /d/{code} URL may serve the video directly
-		if strings.Contains(embedURL, "byse.sx/e/") {
-			videoURL = strings.Replace(embedURL, "/e/", "/d/", 1)
+	if embedURL == "" {
+		for _, player := range hostPlayers {
+			if player.VideoURL != "" {
+				videoURL = player.VideoURL
+				break
+			}
 		}
 	}
 
@@ -423,26 +438,140 @@ func VideoDetail(c *gin.Context) {
 	}
 
 	c.HTML(200, "video.html", gin.H{
-		"Config":       server.Config,
-		"Filename":     filename,
-		"FullPath":     fullPath,
-		"VideoURL":     videoURL,
-		"Size":         size,
-		"ModTime":      modTime,
-		"Username":     username,
-		"ThumbnailURL": thumbURL,
-		"SpriteURL":    spriteURL,
-		"MimeType":     mimeType,
-		"Links":        links,
-		"Tags":         tags,
-		"RoomTitle":    roomTitle,
-		"Viewers":      viewers,
-		"Gender":       gender,
-		"Resolution":   resolution,
-		"Framerate":    framerate,
-		"Related":      related,
-		"EmbedURL":     embedURL,
+		"Config":          server.Config,
+		"Filename":        filename,
+		"FullPath":        fullPath,
+		"VideoURL":        videoURL,
+		"Size":            size,
+		"ModTime":         modTime,
+		"Username":        username,
+		"ThumbnailURL":    thumbURL,
+		"SpriteURL":       spriteURL,
+		"MimeType":        mimeType,
+		"Links":           links,
+		"HostPlayers":     hostPlayers,
+		"HostPlayersJSON": template.JS(hostPlayersJSON),
+		"Tags":            tags,
+		"RoomTitle":       roomTitle,
+		"Viewers":         viewers,
+		"Gender":          gender,
+		"Resolution":      resolution,
+		"Framerate":       framerate,
+		"Related":         related,
+		"EmbedURL":        embedURL,
 	})
+}
+
+func buildHostPlayers(links map[string]string, byseAPIKey string) []hostPlayer {
+	if len(links) == 0 {
+		return nil
+	}
+
+	hosts := make([]string, 0, len(links))
+	for host := range links {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+
+	players := make([]hostPlayer, 0, len(hosts))
+	for _, host := range hosts {
+		link := links[host]
+		players = append(players, hostPlayer{
+			Host:     host,
+			Link:     link,
+			EmbedURL: embedURLForHostLink(host, link, byseAPIKey),
+			VideoURL: videoURLForHostLink(host, link),
+		})
+	}
+	return players
+}
+
+func embedURLForHostLink(host, link, byseAPIKey string) string {
+	if link == "" {
+		return ""
+	}
+	normalizedHost := strings.ToLower(host)
+	normalizedLink := strings.ToLower(link)
+
+	if strings.Contains(normalizedHost, "streamtape") || strings.Contains(normalizedLink, "streamtape.com/") {
+		if code := extractStreamtapeCode(link); code != "" {
+			return "https://streamtape.com/e/" + code
+		}
+	}
+	if strings.Contains(normalizedHost, "byse") || strings.Contains(normalizedLink, "byse.sx/d/") {
+		if code := extractFileCode(link); code != "" {
+			return byseEmbedURL(code, byseAPIKey)
+		}
+	}
+	if strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.now/") {
+		return link
+	}
+	if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
+		if code := extractFileCode(link); code != "" {
+			return "https://voe.sx/e/" + code
+		}
+	}
+	return ""
+}
+
+func byseEmbedURL(fileCode, apiKey string) string {
+	if domain := byseEmbedDomainForKey(apiKey); domain != "" {
+		return "https://" + strings.Trim(domain, "/") + "/e/" + fileCode
+	}
+	return "https://api.byse.sx/e/" + fileCode
+}
+
+func byseEmbedDomainForKey(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+
+	byseEmbedDomainMu.RLock()
+	if byseEmbedDomain != "" && time.Since(byseEmbedDomainFetchedAt) < time.Hour {
+		domain := byseEmbedDomain
+		byseEmbedDomainMu.RUnlock()
+		return domain
+	}
+	byseEmbedDomainMu.RUnlock()
+
+	byseEmbedDomainMu.Lock()
+	defer byseEmbedDomainMu.Unlock()
+	if byseEmbedDomain != "" && time.Since(byseEmbedDomainFetchedAt) < time.Hour {
+		return byseEmbedDomain
+	}
+
+	reqURL := "https://api.byse.sx/get/domain?key=" + url.QueryEscape(apiKey)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	var data struct {
+		NewDomain string `json:"new_domain"`
+		Status    int    `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return ""
+	}
+	if data.Status != http.StatusOK || data.NewDomain == "" {
+		return ""
+	}
+
+	byseEmbedDomain = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(data.NewDomain), "https://"), "http://")
+	byseEmbedDomainFetchedAt = time.Now()
+	return byseEmbedDomain
+}
+
+func videoURLForHostLink(host, link string) string {
+	if link == "" {
+		return ""
+	}
+	return ""
 }
 
 func readSidecar(path string) string {
