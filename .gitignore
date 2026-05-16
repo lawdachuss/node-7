@@ -19,6 +19,7 @@ videos/*
 # Configuration (contains sensitive data)
 conf/*
 !conf/.gitkeep
+!conf/channels.json
 settings.json
 
 # Database files
