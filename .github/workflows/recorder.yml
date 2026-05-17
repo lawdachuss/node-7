@@ -13,6 +13,11 @@ on:
       - master
     paths:
       - .github/workflows/recorder.yml
+      - '**/*.go'
+      - go.mod
+      - go.sum
+      - Dockerfile
+      - docker-compose.yml
 
 concurrency:
   group: recorder
