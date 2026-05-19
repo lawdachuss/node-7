@@ -39,14 +39,32 @@ func supabaseRestAPIKey() string {
         return Config.SupabaseAPIKey
 }
 
+// supabaseRequest makes an authenticated REST call to Supabase with default
+// headers. For writes (POST/PATCH/DELETE with a body) it sets
+// Prefer: resolution=merge-duplicates. Use supabaseRequestWithPrefer when you
+// need explicit control over the Prefer header.
 func supabaseRequest(method, path string, body []byte) (*http.Response, error) {
+        prefer := ""
+        if body != nil {
+                prefer = "resolution=merge-duplicates"
+        }
+        return supabaseRequestWithPrefer(method, path, body, prefer)
+}
+
+// supabaseRequestWithPrefer is the low-level HTTP helper. Pass an empty string
+// for prefer to omit the header entirely.
+func supabaseRequestWithPrefer(method, path string, body []byte, prefer string) (*http.Response, error) {
         baseURL := supabaseRestURL()
         apiKey := supabaseRestAPIKey()
         if baseURL == "" || apiKey == "" {
                 return nil, fmt.Errorf("Supabase not configured")
         }
 
-        req, err := http.NewRequest(method, baseURL+path, bytes.NewReader(body))
+        var bodyReader io.Reader
+        if body != nil {
+                bodyReader = bytes.NewReader(body)
+        }
+        req, err := http.NewRequest(method, baseURL+path, bodyReader)
         if err != nil {
                 return nil, fmt.Errorf("create request: %w", err)
         }
@@ -54,9 +72,11 @@ func supabaseRequest(method, path string, body []byte) (*http.Response, error) {
         req.Header.Set("Authorization", "Bearer "+apiKey)
         if body != nil {
                 req.Header.Set("Content-Type", "application/json")
-                req.Header.Set("Prefer", "resolution=merge-duplicates")
         }
-        client := &http.Client{Timeout: 15 * time.Second}
+        if prefer != "" {
+                req.Header.Set("Prefer", prefer)
+        }
+        client := &http.Client{Timeout: 10 * time.Second}
         return client.Do(req)
 }
 
@@ -71,31 +91,61 @@ func CheckSupabase() error {
 
 // ─── app_settings helpers ─────────────────────────────────────────────────────
 
-// saveJSONSetting upserts a JSON value into the app_settings table via REST.
+// saveJSONSetting writes a JSON value into the app_settings table.
+//
+// Strategy: PATCH the existing row (returns the updated row as JSON when using
+// Prefer: return=representation). If Supabase returns an empty array the key
+// does not exist yet, so we fall back to a plain POST INSERT. This is more
+// reliable than the upsert POST+on_conflict approach, which silently skips the
+// UPDATE when certain Prefer header combinations are used.
 func saveJSONSetting(key string, data []byte) error {
         var rawJSON json.RawMessage
         if err := json.Unmarshal(data, &rawJSON); err != nil {
                 return fmt.Errorf("parse json: %w", err)
         }
 
-        body := map[string]interface{}{
-                "key":   key,
-                "value": rawJSON,
-        }
-        bodyBytes, err := json.Marshal(body)
+        // Build separate bodies: the UPDATE only touches value; the INSERT needs key too.
+        updateBody, err := json.Marshal(map[string]interface{}{"value": rawJSON})
         if err != nil {
-                return fmt.Errorf("marshal: %w", err)
+                return fmt.Errorf("marshal update body: %w", err)
+        }
+        insertBody, err := json.Marshal(map[string]interface{}{"key": key, "value": rawJSON})
+        if err != nil {
+                return fmt.Errorf("marshal insert body: %w", err)
         }
 
-        resp, err := supabaseRequest("POST", "/app_settings", bodyBytes)
+        // Try PATCH first. Ask for the representation so we can tell whether any
+        // row was actually matched (empty array ⟹ no row yet).
+        patchResp, err := supabaseRequestWithPrefer(
+                "PATCH", "/app_settings?key=eq."+key,
+                updateBody, "return=representation",
+        )
         if err != nil {
-                return fmt.Errorf("request: %w", err)
+                return fmt.Errorf("patch request: %w", err)
         }
-        defer resp.Body.Close()
-        if resp.StatusCode >= 400 {
-                b, _ := io.ReadAll(resp.Body)
-                return fmt.Errorf("api returned %d: %s", resp.StatusCode, string(b))
+        defer patchResp.Body.Close()
+        patchRespBody, _ := io.ReadAll(patchResp.Body)
+        if patchResp.StatusCode >= 400 {
+                return fmt.Errorf("patch returned %d: %s", patchResp.StatusCode, string(patchRespBody))
         }
+
+        // Supabase returns "[]" when PATCH matched zero rows.
+        if strings.TrimSpace(string(patchRespBody)) == "[]" {
+                // Row doesn't exist yet — INSERT it.
+                insertResp, err := supabaseRequestWithPrefer("POST", "/app_settings", insertBody, "return=minimal")
+                if err != nil {
+                        return fmt.Errorf("insert request: %w", err)
+                }
+                defer insertResp.Body.Close()
+                if insertResp.StatusCode >= 400 {
+                        b, _ := io.ReadAll(insertResp.Body)
+                        return fmt.Errorf("insert returned %d: %s", insertResp.StatusCode, string(b))
+                }
+                fmt.Printf("[DEBUG] saveJSONSetting(%q): inserted new row\n", key)
+                return nil
+        }
+
+        fmt.Printf("[DEBUG] saveJSONSetting(%q): updated existing row (%d bytes)\n", key, len(patchRespBody))
         return nil
 }
 
@@ -132,51 +182,82 @@ func loadJSONSetting(key string) []byte {
 // ─── Channels ─────────────────────────────────────────────────────────────────
 
 // SaveChannelsToDB saves channels to Supabase.
+//
+// Primary path (synchronous, authoritative): upserts the entire channel list
+// as a single JSON blob in app_settings (key = "channels"). This PATCH is the
+// only thing the caller needs to wait for — once it returns, the deletion or
+// state change is durable.
+//
+// Secondary path (async, best-effort): individual channel rows in the channels
+// table are kept in sync so FK lookups from recordings still work. This runs in
+// a background goroutine so it never blocks the HTTP handler. Stale rows here
+// are harmless because LoadChannelsFromDB reads from app_settings first.
 func SaveChannelsToDB(data []byte) error {
         client := GetDBClient()
         if client == nil {
                 return fmt.Errorf("Supabase not configured")
         }
 
-        var configs []*entity.ChannelConfig
-        if err := json.Unmarshal(data, &configs); err != nil {
-                return fmt.Errorf("unmarshal channels: %w", err)
+        // ── Primary (blocking): update the authoritative channel list blob. ──────
+        if err := saveJSONSetting("channels", data); err != nil {
+                return fmt.Errorf("save channels to app_settings: %w", err)
         }
 
-        for _, conf := range configs {
-                ch := &database.Channel{
-                        Username:    conf.Username,
-                        IsPaused:    conf.IsPaused.Load(),
-                        Framerate:   conf.Framerate,
-                        Resolution:  conf.Resolution,
-                        Pattern:     conf.Pattern,
-                        MaxDuration: conf.MaxDuration,
-                        MaxFilesize: conf.MaxFilesize,
-                        Compress:    conf.Compress,
-                        CreatedAt:   conf.CreatedAt,
+        // ── Secondary (non-blocking): sync individual rows for FK integrity. ─────
+        // Deliberately fire-and-forget — a slow or failed upsert must never block
+        // the delete/pause/resume HTTP response.
+        dataCopy := make([]byte, len(data))
+        copy(dataCopy, data)
+        go func() {
+                var configs []*entity.ChannelConfig
+                if err := json.Unmarshal(dataCopy, &configs); err != nil {
+                        return
                 }
-                if err := client.SaveChannel(ch); err != nil {
-                        return fmt.Errorf("save channel %s: %w", conf.Username, err)
+                for _, conf := range configs {
+                        ch := &database.Channel{
+                                Username:    conf.Username,
+                                IsPaused:    conf.IsPaused.Load(),
+                                Framerate:   conf.Framerate,
+                                Resolution:  conf.Resolution,
+                                Pattern:     conf.Pattern,
+                                MaxDuration: conf.MaxDuration,
+                                MaxFilesize: conf.MaxFilesize,
+                                Compress:    conf.Compress,
+                                CreatedAt:   conf.CreatedAt,
+                        }
+                        if err := client.SaveChannel(ch); err != nil {
+                                fmt.Printf("[WARN] SaveChannelsToDB: failed to sync channel %s to channels table: %v\n", conf.Username, err)
+                        }
                 }
-        }
+        }()
 
         return nil
 }
 
-// LoadChannelsFromDB loads channels from Supabase
+// LoadChannelsFromDB loads channels from Supabase.
+// It reads from app_settings first (the authoritative blob written by
+// SaveChannelsToDB), which correctly reflects deletions without needing
+// DELETE permission. Falls back to the channels table rows for
+// backward-compatibility with older deployments that never wrote the blob.
 func LoadChannelsFromDB() []byte {
         client := GetDBClient()
         if client == nil {
                 return nil
         }
 
+        // Primary: read the authoritative channel list blob from app_settings.
+        if data := loadJSONSetting("channels"); data != nil {
+                return data
+        }
+
+        // Fallback: read individual rows from the channels table (legacy path).
+        fmt.Println("[INFO] LoadChannelsFromDB: no channels blob in app_settings, falling back to channels table")
         channels, err := client.GetAllChannels()
         if err != nil {
                 fmt.Printf("[WARN] failed to load channels from Supabase: %v\n", err)
                 return nil
         }
 
-        // Convert to entity.ChannelConfig format
         configs := make([]*entity.ChannelConfig, len(channels))
         for i, ch := range channels {
                 configs[i] = &entity.ChannelConfig{

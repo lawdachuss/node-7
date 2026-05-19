@@ -209,53 +209,55 @@ func (m *Manager) CreateChannel(conf *entity.ChannelConfig, shouldSave bool) err
         go ch.Resume(0)
 
         if shouldSave {
-                if err := m.SaveConfig(); err != nil {
-                        return fmt.Errorf("save config: %w", err)
-                }
+                go func() {
+                        if err := m.SaveConfig(); err != nil {
+                                fmt.Printf("[WARN] SaveConfig after create %q: %v\n", conf.Username, err)
+                        }
+                }()
         }
         return nil
 }
 
-// StopChannel stops the channel.
+// StopChannel deletes a channel permanently.
+//
+// Execution order:
+//  1. Remove from the in-memory map immediately — the channel disappears from
+//     the UI on the very next page load, and duplicate requests are no-ops.
+//  2. Persist synchronously via SaveConfig (PATCH to app_settings blob) —
+//     this is the only call that MUST complete before the HTTP redirect so the
+//     deletion survives a subsequent app restart.
+//  3. Stop the ffmpeg recording process in a goroutine — gracefully terminating
+//     ffmpeg can take several seconds, and blocking the HTTP handler for that
+//     long causes browser timeouts and duplicate click events. The OS will clean
+//     up any still-running ffmpeg processes if the app exits before Stop returns.
+//  4. Delete the secondary channels-table row in a goroutine — best-effort FK
+//     cleanup that never needs to block the response.
 func (m *Manager) StopChannel(username string) error {
         thing, ok := m.Channels.Load(username)
         if !ok {
-                fmt.Printf("[DEBUG] StopChannel: channel %q not found in memory\n", username)
                 return nil
         }
-        thing.(*channel.Channel).Stop()
+
+        // Step 1: remove from memory so subsequent requests are immediate no-ops
+        // and the UI reflects the deletion on the next GET /.
         m.Channels.Delete(username)
-        fmt.Printf("[DEBUG] StopChannel: stopped and removed %q from memory\n", username)
 
-        // Collect remaining usernames BEFORE the saves so the cleanup is consistent.
-        var remaining []string
-        m.Channels.Range(func(key, _ any) bool {
-                remaining = append(remaining, key.(string))
-                return true
-        })
-
-        // 1. Try a targeted DELETE for the removed channel.
-        if err := server.DeleteChannelFromDB(username); err != nil {
-                fmt.Printf("[WARN] DeleteChannelFromDB(%q) failed: %v\n", username, err)
-        } else {
-                fmt.Printf("[DEBUG] DeleteChannelFromDB(%q) succeeded\n", username)
-        }
-
-        // 2. Belt-and-suspenders: delete any Supabase rows NOT in the remaining set.
-        //    This catches cases where the targeted DELETE is blocked by RLS but the
-        //    bulk filter variant is allowed, and also cleans up any other stale rows.
-        if err := server.DeleteChannelsNotInDB(remaining); err != nil {
-                fmt.Printf("[WARN] DeleteChannelsNotInDB failed: %v\n", err)
-        } else {
-                fmt.Printf("[DEBUG] DeleteChannelsNotInDB succeeded, remaining: %v\n", remaining)
-        }
-
-        // 3. Upsert the remaining channels to keep Supabase in sync.
+        // Step 2: synchronous PATCH to the authoritative app_settings blob.
+        // Must complete before we redirect so the deletion survives a restart.
         if err := m.SaveConfig(); err != nil {
-                fmt.Printf("[ERROR] SaveConfig after delete: %v\n", err)
+                fmt.Printf("[ERROR] SaveConfig after delete of %q: %v\n", username, err)
                 return fmt.Errorf("save config: %w", err)
         }
-        fmt.Printf("[DEBUG] StopChannel: done, remaining channels: %v\n", remaining)
+        fmt.Printf(" INFO [manager] channel %q deleted and persisted to Supabase\n", username)
+
+        // Step 3 & 4: non-blocking cleanup — these never need to block the redirect.
+        go func() {
+                thing.(*channel.Channel).Stop()
+                if err := server.DeleteChannelFromDB(username); err != nil {
+                        fmt.Printf("[WARN] DeleteChannelFromDB(%q): %v\n", username, err)
+                }
+        }()
+
         return nil
 }
 
@@ -269,30 +271,28 @@ func (m *Manager) WaitForUploads() {
         })
 }
 
-// PauseChannel pauses the channel.
+// PauseChannel pauses the channel and synchronously persists the state.
 func (m *Manager) PauseChannel(username string) error {
         thing, ok := m.Channels.Load(username)
         if !ok {
                 return nil
         }
         thing.(*channel.Channel).Pause()
-
         if err := m.SaveConfig(); err != nil {
-                return fmt.Errorf("save config: %w", err)
+                fmt.Printf("[WARN] SaveConfig after pause %q: %v\n", username, err)
         }
         return nil
 }
 
-// ResumeChannel resumes the channel.
+// ResumeChannel resumes the channel and synchronously persists the state.
 func (m *Manager) ResumeChannel(username string) error {
         thing, ok := m.Channels.Load(username)
         if !ok {
                 return nil
         }
         thing.(*channel.Channel).Resume(0)
-
         if err := m.SaveConfig(); err != nil {
-                return fmt.Errorf("save config: %w", err)
+                fmt.Printf("[WARN] SaveConfig after resume %q: %v\n", username, err)
         }
         return nil
 }
