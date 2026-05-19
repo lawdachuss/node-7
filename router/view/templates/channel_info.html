@@ -114,13 +114,13 @@
       {{ if .IsPaused }}
       <button class="w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-semibold rounded-xl transition-all"
               style="background:linear-gradient(135deg,#d4a053,#a07830);color:white;box-shadow:0 4px 12px rgba(212,160,83,0.25)"
-              hx-post="/resume_channel/{{ .Username }}" hx-swap="none">
+              onclick="window.location.href='/resume_channel/{{ .Username }}'">
         <svg class="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         Resume
       </button>
       {{ else }}
       <button class="info-btn w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium rounded-xl transition-all text-zinc-400 hover:text-zinc-200"
-              hx-post="/pause_channel/{{ .Username }}" hx-swap="none">
+              onclick="window.location.href='/pause_channel/{{ .Username }}'">
         <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
         </svg>
@@ -129,15 +129,13 @@
       {{ end }}
     </div>
     <div>
-      <form action="/stop_channel/{{ .Username }}" method="POST" onsubmit="return confirm('Delete channel \`{{ .Username }}\`?')">
-        <button type="submit" class="info-btn-delete w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium rounded-xl transition-all text-amber-500 hover:text-amber-300"
->
-          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-          </svg>
-          Delete
-        </button>
-      </form>
+      <button type="button" onclick="openDeleteChannelDialog('{{ .Username }}')"
+              class="info-btn-delete w-full flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium rounded-xl transition-all text-amber-500 hover:text-amber-300">
+        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+        </svg>
+        Delete
+      </button>
     </div>
   </div>
 
