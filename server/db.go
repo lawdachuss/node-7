@@ -406,7 +406,7 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 		return fmt.Errorf("Supabase not configured")
 	}
 
-	// Save recording
+	// Look up channel ID for foreign key
 	rec := &database.Recording{
 		Username:     username,
 		Filename:     filename,
@@ -421,6 +421,9 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 		ThumbnailURL: thumbnailURL,
 		SpriteURL:    spriteURL,
 		EmbedURL:     embedURL,
+	}
+	if ch, err := client.GetChannel(username); err == nil {
+		rec.ChannelID = ch.ID
 	}
 
 	if err := client.SaveRecording(rec); err != nil {

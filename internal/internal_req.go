@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,9 +32,6 @@ func CreateTransport() *http.Transport {
 	defaultTransport := http.DefaultTransport.(*http.Transport)
 
 	newTransport := defaultTransport.Clone()
-	newTransport.TLSClientConfig = &tls.Config{
-		InsecureSkipVerify: true,
-	}
 	return newTransport
 }
 

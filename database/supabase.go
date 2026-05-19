@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -140,7 +141,7 @@ func (c *Client) SaveChannel(ch *Channel) error {
 	existing, err := c.GetChannel(ch.Username)
 	if err == nil && existing != nil {
 		// Channel exists, update it
-		return c.patch(fmt.Sprintf("/channels?username=eq.%s", ch.Username), ch)
+		return c.patch(fmt.Sprintf("/channels?username=eq.%s", url.QueryEscape(ch.Username)), ch)
 	}
 
 	// Channel doesn't exist, insert it
@@ -160,7 +161,7 @@ func (c *Client) SaveChannel(ch *Channel) error {
 // GetChannel retrieves a channel by username
 func (c *Client) GetChannel(username string) (*Channel, error) {
 	var channels []Channel
-	err := c.get(fmt.Sprintf("/channels?username=eq.%s&limit=1", username), &channels)
+	err := c.get(fmt.Sprintf("/channels?username=eq.%s&limit=1", url.QueryEscape(username)), &channels)
 	if err != nil {
 		return nil, err
 	}
@@ -173,13 +174,13 @@ func (c *Client) GetChannel(username string) (*Channel, error) {
 // GetAllChannels retrieves all channels
 func (c *Client) GetAllChannels() ([]Channel, error) {
 	var channels []Channel
-	err := c.get("/channels?order=created_at.desc", &channels)
+	err := c.get("/channels?order=created_at.desc&limit=50000", &channels)
 	return channels, err
 }
 
 // DeleteChannel removes a channel
 func (c *Client) DeleteChannel(username string) error {
-	return c.delete(fmt.Sprintf("/channels?username=eq.%s", username))
+	return c.delete(fmt.Sprintf("/channels?username=eq.%s", url.QueryEscape(username)))
 }
 
 // ============================================================================
@@ -212,7 +213,7 @@ func (c *Client) SaveRecording(rec *Recording) error {
 	existing, err := c.GetRecording(rec.Filename)
 	if err == nil && existing != nil {
 		// Recording exists, update it
-		return c.patch(fmt.Sprintf("/recordings?filename=eq.%s", rec.Filename), rec)
+		return c.patch(fmt.Sprintf("/recordings?filename=eq.%s", url.QueryEscape(rec.Filename)), rec)
 	}
 
 	// Recording doesn't exist, insert it
@@ -232,7 +233,7 @@ func (c *Client) SaveRecording(rec *Recording) error {
 // GetRecording retrieves a recording by filename
 func (c *Client) GetRecording(filename string) (*Recording, error) {
 	var recordings []Recording
-	err := c.get(fmt.Sprintf("/recordings?filename=eq.%s&limit=1", filename), &recordings)
+	err := c.get(fmt.Sprintf("/recordings?filename=eq.%s&limit=1", url.QueryEscape(filename)), &recordings)
 	if err != nil {
 		return nil, err
 	}
@@ -245,20 +246,20 @@ func (c *Client) GetRecording(filename string) (*Recording, error) {
 // GetRecordingsByUsername retrieves all recordings for a username
 func (c *Client) GetRecordingsByUsername(username string) ([]Recording, error) {
 	var recordings []Recording
-	err := c.get(fmt.Sprintf("/recordings?username=eq.%s&order=timestamp.desc", username), &recordings)
+	err := c.get(fmt.Sprintf("/recordings?username=eq.%s&order=timestamp.desc", url.QueryEscape(username)), &recordings)
 	return recordings, err
 }
 
 // GetAllRecordings retrieves all recordings
 func (c *Client) GetAllRecordings() ([]Recording, error) {
 	var recordings []Recording
-	err := c.get("/recordings?order=timestamp.desc", &recordings)
+	err := c.get("/recordings?order=timestamp.desc&limit=50000", &recordings)
 	return recordings, err
 }
 
 // DeleteRecording removes a recording
 func (c *Client) DeleteRecording(filename string) error {
-	return c.delete(fmt.Sprintf("/recordings?filename=eq.%s", filename))
+	return c.delete(fmt.Sprintf("/recordings?filename=eq.%s", url.QueryEscape(filename)))
 }
 
 // ============================================================================
@@ -282,7 +283,7 @@ func (c *Client) SaveUploadLink(link *UploadLink) error {
 // GetUploadLinks retrieves all upload links for a recording
 func (c *Client) GetUploadLinks(recordingID string) ([]UploadLink, error) {
 	var links []UploadLink
-	err := c.get(fmt.Sprintf("/upload_links?recording_id=eq.%s", recordingID), &links)
+	err := c.get(fmt.Sprintf("/upload_links?recording_id=eq.%s", url.QueryEscape(recordingID)), &links)
 	return links, err
 }
 
@@ -325,7 +326,7 @@ func (c *Client) SaveSetting(key string, value interface{}) error {
 // GetSetting retrieves an app setting
 func (c *Client) GetSetting(key string, result interface{}) error {
 	var settings []AppSetting
-	err := c.get(fmt.Sprintf("/app_settings?key=eq.%s&limit=1", key), &settings)
+	err := c.get(fmt.Sprintf("/app_settings?key=eq.%s&limit=1", url.QueryEscape(key)), &settings)
 	if err != nil {
 		return err
 	}
@@ -397,7 +398,7 @@ func (c *Client) SaveLog(log *ChannelLog) error {
 // GetLogs retrieves logs for a channel
 func (c *Client) GetLogs(username string, limit int) ([]ChannelLog, error) {
 	var logs []ChannelLog
-	err := c.get(fmt.Sprintf("/channel_logs?username=eq.%s&order=created_at.desc&limit=%d", username, limit), &logs)
+	err := c.get(fmt.Sprintf("/channel_logs?username=eq.%s&order=created_at.desc&limit=%d", url.QueryEscape(username), limit), &logs)
 	return logs, err
 }
 
@@ -421,7 +422,7 @@ func (c *Client) SavePreviewImage(img *PreviewImage) error {
 	existing, err := c.GetPreviewImage(img.Filename)
 	if err == nil && existing != nil {
 		// Preview image exists, update it
-		return c.patch(fmt.Sprintf("/preview_images?filename=eq.%s", img.Filename), img)
+		return c.patch(fmt.Sprintf("/preview_images?filename=eq.%s", url.QueryEscape(img.Filename)), img)
 	}
 
 	// Preview image doesn't exist, insert it
@@ -441,7 +442,7 @@ func (c *Client) SavePreviewImage(img *PreviewImage) error {
 // GetPreviewImage retrieves preview image metadata
 func (c *Client) GetPreviewImage(filename string) (*PreviewImage, error) {
 	var images []PreviewImage
-	err := c.get(fmt.Sprintf("/preview_images?filename=eq.%s&limit=1", filename), &images)
+	err := c.get(fmt.Sprintf("/preview_images?filename=eq.%s&limit=1", url.QueryEscape(filename)), &images)
 	if err != nil {
 		return nil, err
 	}
