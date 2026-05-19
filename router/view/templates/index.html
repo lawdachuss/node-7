@@ -206,6 +206,22 @@
         .log-terminal-title { color: #2e2e34; font-family: ui-monospace, monospace; }
         .log-terminal-meta { font-family: ui-monospace, monospace; font-size: 10px; color: #2e2e34; }
 
+        /* Log line left-border color accent per type */
+        .log-line { border-left: 2px solid transparent; padding-left: 12px; }
+        .log-line.log-type-play     { border-left-color: rgba(52,211,153,0.55);  background: rgba(52,211,153,0.025); }
+        .log-line.log-type-stop     { border-left-color: rgba(251,113,133,0.45); background: rgba(251,113,133,0.02); }
+        .log-line.log-type-error    { border-left-color: rgba(239,68,68,0.55);   background: rgba(239,68,68,0.03);  }
+        .log-line.log-type-warn     { border-left-color: rgba(245,158,11,0.6);   background: rgba(245,158,11,0.03); }
+        .log-line.log-type-compress { border-left-color: rgba(192,132,252,0.5);  background: rgba(192,132,252,0.025); }
+        .log-line.log-type-mux      { border-left-color: rgba(34,211,238,0.4);   background: rgba(34,211,238,0.02); }
+        .log-line.log-type-upload   { border-left-color: rgba(96,165,250,0.45);  background: rgba(96,165,250,0.02); }
+        .log-line.log-type-delete   { border-left-color: rgba(248,113,113,0.4);  background: rgba(248,113,113,0.02); }
+        .log-line.log-type-file     { border-left-color: rgba(251,191,36,0.45);  background: rgba(251,191,36,0.02); }
+        .log-line.log-type-cf       { border-left-color: rgba(249,115,22,0.5);   background: rgba(249,115,22,0.025); }
+        .log-line.log-type-status   { border-left-color: rgba(45,212,191,0.4);   background: rgba(45,212,191,0.02); }
+        .log-line.log-type-thumbnail{ border-left-color: rgba(236,72,153,0.4);   background: rgba(236,72,153,0.02); }
+        .log-line.log-type-info     { border-left-color: transparent; }
+
         html:not(.dark) .log-terminal { background: #f9fafb; }
         html:not(.dark) .log-terminal-bar { background: #f9fafb; border-bottom: 1px solid #e4e4e7; }
         html:not(.dark) .log-terminal-footer { background: #f9fafb; border-top: 1px solid #e4e4e7; }
@@ -410,17 +426,19 @@
                         <span class="log-terminal-title text-[10px] shrink-0">{{ .Username }}.log</span>
                         <div class="ml-auto flex items-center gap-1 flex-wrap">
                             <button class="log-filter-btn active" data-filter="all">all</button>
-                            <button class="log-filter-dot" data-filter="play"     title="Recording"  style="color:#10b981">●</button>
-                            <button class="log-filter-dot" data-filter="stop"     title="Stopped"    style="color:#d4a053">●</button>
-                            <button class="log-filter-dot" data-filter="error"    title="Error"      style="color:#ef4444">●</button>
-                            <button class="log-filter-dot" data-filter="compress" title="Compress"   style="color:#8b5cf6">●</button>
-                            <button class="log-filter-dot" data-filter="mux"      title="Mux"        style="color:#06b6d4">●</button>
-                            <button class="log-filter-dot" data-filter="file"     title="File"       style="color:#f59e0b">●</button>
-                            <button class="log-filter-dot" data-filter="upload"   title="Upload"     style="color:#3b82f6">●</button>
-                            <button class="log-filter-dot" data-filter="delete"   title="Delete"     style="color:#dc2626">●</button>
-                            <button class="log-filter-dot" data-filter="cf"       title="Cloudflare" style="color:#f97316">●</button>
-                            <button class="log-filter-dot" data-filter="status"   title="Status"     style="color:#14b8a6">●</button>
-                            <button class="log-filter-dot" data-filter="info"     title="Info"       style="color:#3f3f46">●</button>
+                            <button class="log-filter-dot" data-filter="play"      title="Recording"  style="color:#10b981">●</button>
+                            <button class="log-filter-dot" data-filter="stop"      title="Stopped"    style="color:#d4a053">●</button>
+                            <button class="log-filter-dot" data-filter="error"     title="Error"      style="color:#ef4444">●</button>
+                            <button class="log-filter-dot" data-filter="warn"      title="Warning"    style="color:#f59e0b">●</button>
+                            <button class="log-filter-dot" data-filter="compress"  title="Compress"   style="color:#8b5cf6">●</button>
+                            <button class="log-filter-dot" data-filter="mux"       title="Mux"        style="color:#06b6d4">●</button>
+                            <button class="log-filter-dot" data-filter="file"      title="File"       style="color:#f59e0b;opacity:0.6">●</button>
+                            <button class="log-filter-dot" data-filter="upload"    title="Upload"     style="color:#3b82f6">●</button>
+                            <button class="log-filter-dot" data-filter="delete"    title="Delete"     style="color:#dc2626">●</button>
+                            <button class="log-filter-dot" data-filter="cf"        title="Cloudflare" style="color:#f97316">●</button>
+                            <button class="log-filter-dot" data-filter="status"    title="Status"     style="color:#14b8a6">●</button>
+                            <button class="log-filter-dot" data-filter="thumbnail" title="Thumbnail"  style="color:#ec4899">●</button>
+                            <button class="log-filter-dot" data-filter="info"      title="Info"       style="color:#3f3f46">●</button>
                             <button class="log-filter-clear" title="Clear">✕</button>
                         </div>
                     </div>
@@ -681,29 +699,44 @@ function parseLog(raw) {
 
 // Map message prefix → { type, color }
 var LOG_MSG_RULES = [
-    { re: /^starting to record/i,              type: 'play',     color: '#34d399' },
-    { re: /^channel resumed/i,                 type: 'play',     color: '#34d399' },
-    { re: /^channel (?:paused|stopped)/i,      type: 'stop',     color: '#fb7185' },
-    { re: /^blocked by Cloudflare/i,           type: 'cf',       color: '#fb923c' },
-    { re: /^paused status check blocked/i,     type: 'cf',       color: '#fb923c' },
-    { re: /^upload:/i,                         type: 'upload',   color: '#60a5fa' },
-    { re: /^compress:/i,                       type: 'compress', color: '#c084fc' },
-    { re: /^mux:/i,                            type: 'mux',      color: '#22d3ee' },
-    { re: /^delete:/i,                         type: 'delete',   color: '#f87171' },
-    { re: /^output-dir:/i,                     type: 'file',     color: '#fbbf24' },
-    { re: /^max filesize or duration/i,        type: 'file',     color: '#fbbf24' },
-    { re: /^new file created/i,                type: 'file',     color: '#fbbf24' },
-    { re: /^stream quality/i,                  type: 'status',   color: '#2dd4bf' },
-    { re: /^channel status:/i,                 type: 'status',   color: '#2dd4bf' },
-    { re: /^channel is /i,                     type: 'status',   color: '#2dd4bf' },
-    { re: /^detected separate audio/i,         type: 'status',   color: '#a78bfa' },
-    { re: /^channel was paused/i,              type: 'status',   color: '#a78bfa' },
-    { re: /^duration:/i,                       type: 'info',     color: '#3f3f46' },
+    // Recording lifecycle
+    { re: /^starting to record/i,              type: 'play',      color: '#34d399' },
+    { re: /^channel resumed/i,                 type: 'play',      color: '#34d399' },
+    { re: /^channel (?:paused|stopped)/i,      type: 'stop',      color: '#fb7185' },
+    // Cloudflare / network
+    { re: /^blocked by Cloudflare/i,           type: 'cf',        color: '#fb923c' },
+    { re: /^paused status check blocked/i,     type: 'cf',        color: '#fb923c' },
+    { re: /^channel is live but stream URL/i,  type: 'cf',        color: '#fb923c' },
+    // Upload
+    { re: /^upload:/i,                         type: 'upload',    color: '#60a5fa' },
+    // Compress
+    { re: /^compress:/i,                       type: 'compress',  color: '#c084fc' },
+    // Mux
+    { re: /^mux:/i,                            type: 'mux',       color: '#22d3ee' },
+    // Thumbnail / preview
+    { re: /^thumbnail:/i,                      type: 'thumbnail', color: '#f472b6' },
+    { re: /^preview:/i,                        type: 'thumbnail', color: '#f472b6' },
+    { re: /^sprite:/i,                         type: 'thumbnail', color: '#f472b6' },
+    // File / output
+    { re: /^delete:/i,                         type: 'delete',    color: '#f87171' },
+    { re: /^output-dir:/i,                     type: 'file',      color: '#fbbf24' },
+    { re: /^file:/i,                           type: 'file',      color: '#fbbf24' },
+    { re: /^max filesize or duration/i,        type: 'file',      color: '#fbbf24' },
+    { re: /^new file created/i,                type: 'file',      color: '#fbbf24' },
+    // Status / stream quality
+    { re: /^stream quality/i,                  type: 'status',    color: '#2dd4bf' },
+    { re: /^channel status:/i,                 type: 'status',    color: '#2dd4bf' },
+    { re: /^channel is /i,                     type: 'status',    color: '#2dd4bf' },
+    { re: /^status:/i,                         type: 'status',    color: '#2dd4bf' },
+    { re: /^detected separate audio/i,         type: 'mux',       color: '#22d3ee' },
+    { re: /^channel was paused/i,              type: 'status',    color: '#a78bfa' },
+    // Progress (suppress / dim)
+    { re: /^duration:/i,                       type: 'info',      color: '#3f3f46' },
 ];
 
 var LOG_LEVEL_STYLE = {
     'ERROR': { text: '#ef4444', msgColor: '#f87171', type: 'error' },
-    'WARN':  { text: '#f59e0b', msgColor: '#fbbf24', type: 'error' },
+    'WARN':  { text: '#f59e0b', msgColor: '#fbbf24', type: 'warn'  },
     'INFO':  { text: '#2e2e34', msgColor: null,      type: null    },
 };
 
@@ -726,6 +759,15 @@ function highlightMsg(msg, baseColor) {
     var safe = msg.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     // Backtick strings → orange mono
     safe = safe.replace(/`([^`]+)`/g, '<span style="color:#fb923c;font-family:ui-monospace,monospace;background:rgba(251,146,60,0.08);padding:0 3px;border-radius:3px">$1</span>');
+    // Upload host names in brackets [GoFile], [Streamtape] etc → styled badge
+    safe = safe.replace(/\[(GoFile|Streamtape|VOE\.sx|VoeSX|TurboViPlay|SendCM|Byse|GitHub)\]/g,
+        '<span style="color:#94a3b8;background:rgba(148,163,184,0.1);padding:0 4px;border-radius:3px;font-size:10px;font-weight:600">[$1]</span>');
+    // Encoder names (NVENC, AMF, QSV, VideoToolbox, CPU) → highlighted
+    safe = safe.replace(/\b(NVENC|AMF|QSV|VideoToolbox|CPU|libx264|h264_nvenc|h264_amf|h264_qsv)\b/g,
+        '<span style="color:#c084fc;font-weight:600">$1</span>');
+    // URLs → dim link-style
+    safe = safe.replace(/(https?:\/\/[^\s<]+)/g,
+        '<span style="color:#60a5fa;text-decoration:underline;text-underline-offset:2px;opacity:0.8">$1</span>');
     // File names (e.g. foo.mp4, bar.ts) → amber mono
     safe = safe.replace(/\b([\w.\-]+\.(?:ts|mp4|mkv|webm|avi|mov))\b/g, '<span style="color:#fbbf24;font-family:ui-monospace,monospace">$1</span>');
     // Sizes: 1.2 MB / 512 KB → cyan
@@ -735,14 +777,16 @@ function highlightMsg(msg, baseColor) {
     // Resolution Np (e.g. 1080p, 720p) → violet
     safe = safe.replace(/\b(\d{3,4})p\b/g, '<span style="color:#a78bfa;font-weight:600">$1p</span>');
     // FPS → violet
-    safe = safe.replace(/\b(\d+)fps\b/g, '<span style="color:#a78bfa;font-weight:600">$1fps</span>');
+    safe = safe.replace(/\b(\d+)\s*(?:fps|@\s*\d+fps)/g, function(m, n) { return '<span style="color:#a78bfa;font-weight:600">' + m + '</span>'; });
+    // Viewer counts → teal
+    safe = safe.replace(/\b(\d+)\s+viewers?\b/g, '<span style="color:#2dd4bf;font-weight:600">$1 viewers</span>');
     // Percentages → yellow
     safe = safe.replace(/\b(\d+(?:\.\d+)?%)/g, '<span style="color:#fde047;font-weight:600">$1</span>');
     // Numbers in parens like (attempt 3) → dim yellow
     safe = safe.replace(/\(attempt (\d+)\)/g, '<span style="color:#a16207">(attempt $1)</span>');
     // Retry countdown → dim
     safe = safe.replace(/retry in (\d+) min/g, 'retry in <span style="color:#71717a">$1 min</span>');
-    safe = safe.replace(/try again in (\d+) min/g, 'try again in <span style="color:#71717a">$1 min</span>');
+    safe = safe.replace(/try again in (\d+) min(?:\(s\))?/g, 'try again in <span style="color:#71717a">$1 min</span>');
     return safe;
 }
 

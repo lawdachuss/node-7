@@ -37,6 +37,7 @@ func (c *ChannelConfig) Sanitize() {
 type ChannelInfo struct {
         IsOnline     bool
         IsPaused     bool
+        IsCompressing bool
         RoomStatus   string // public, private, group, away, offline, hidden
         Username     string
         Duration     string
@@ -83,18 +84,18 @@ type Config struct {
         PerModelFolder bool
         DeleteLocalAfterUpload bool
 
-	TurboViPlayAPIKey string
-	VoeSXAPIKey       string
-	StreamtapeLogin   string
-	StreamtapeAPIKey  string
-	SendCMAPIKey      string
-	ByseAPIKey        string
+        TurboViPlayAPIKey string
+        VoeSXAPIKey       string
+        StreamtapeLogin   string
+        StreamtapeAPIKey  string
+        SendCMAPIKey      string
+        ByseAPIKey        string
 
-	GitHubToken       string
-	GitHubRepo        string
-	GitHubBranch      string
-	GitHubPreviewPath string
+        GitHubToken       string
+        GitHubRepo        string
+        GitHubBranch      string
+        GitHubPreviewPath string
 
-	SupabaseURL    string
-	SupabaseAPIKey string
+        SupabaseURL    string
+        SupabaseAPIKey string
 }

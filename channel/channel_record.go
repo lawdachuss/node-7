@@ -22,18 +22,18 @@ func (ch *Channel) Monitor() {
         // and will be called by `Pause` or `Stop` functions
         ctx, _ := ch.WithCancel(context.Background())
 
-	var err error
-	cfBlockCount := 0
-	for {
-		if err = ctx.Err(); err != nil {
-			break
-		}
+        var err error
+        cfBlockCount := 0
+        for {
+                if err = ctx.Err(); err != nil {
+                        break
+                }
 
-		pipeline := func() error {
-			return ch.RecordStream(ctx, client)
-		}
+                pipeline := func() error {
+                        return ch.RecordStream(ctx, client)
+                }
 
-		onRetry := func(_ uint, err error) {
+                onRetry := func(_ uint, err error) {
                         ch.UpdateOnlineStatus(false)
 
                         if isCFBlock(err) {
@@ -116,41 +116,51 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
                 return fmt.Errorf("get playlist: %w", err)
         }
 
-	// Capture room metadata cached on the client from GetStream.
-	ch.RoomTitle = client.LastRoomTitle
-	ch.Tags = client.LastTags
-	ch.Viewers = client.LastViewers
+        // Capture room metadata cached on the client from GetStream.
+        ch.RoomTitle = client.LastRoomTitle
+        ch.Tags = client.LastTags
+        ch.Viewers = client.LastViewers
 
-	// Capture actual stream quality from the playlist
-	ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
-	ch.Framerate = playlist.Framerate
+        // Capture actual stream quality from the playlist
+        ch.Resolution = fmt.Sprintf("%dp", playlist.Resolution)
+        ch.Framerate = playlist.Framerate
 
-	ch.StreamedAt = time.Now().Unix()
-	ch.Sequence = 0
-	ch.InitSegment = nil
-	ch.AudioInitSegment = nil
-	ch.HasSeparateAudio = playlist.AudioPlaylistURL != ""
-	ch.switchRequested = false
+        ch.StreamedAt = time.Now().Unix()
+        ch.Sequence = 0
+        ch.InitSegment = nil
+        ch.AudioInitSegment = nil
+        ch.HasSeparateAudio = playlist.AudioPlaylistURL != ""
+        ch.switchRequested = false
 
-	if err := ch.NextFile(); err != nil {
-		return fmt.Errorf("next file: %w", err)
-	}
+        if err := ch.NextFile(); err != nil {
+                return fmt.Errorf("next file: %w", err)
+        }
 
-	// Ensure file is cleaned up when this function exits in any case
-	defer func() {
-		if err := ch.Cleanup(false); err != nil {
-			ch.Error("cleanup on record stream exit: %s", err.Error())
-		}
-	}()
+        // Ensure file is cleaned up when this function exits in any case
+        defer func() {
+                if err := ch.Cleanup(false); err != nil {
+                        ch.Error("cleanup on record stream exit: %s", err.Error())
+                }
+        }()
 
         ch.stateMu.Lock()
         ch.RoomStatus = chaturbate.StatusPublic
         ch.stateMu.Unlock()
         ch.UpdateOnlineStatus(true) // after GetPlaylist succeeds
 
-        ch.Info("stream quality - resolution %dp (target: %dp), framerate %dfps (target: %dfps)", playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
+        ch.Info("stream quality - %dp @ %dfps (target: %dp @ %dfps)", playlist.Resolution, playlist.Framerate, ch.Config.Resolution, ch.Config.Framerate)
         if ch.HasSeparateAudio {
-                ch.Info("detected separate audio rendition, recording and muxing audio/video streams")
+                ch.Info("mux: separate audio track detected — will mux audio/video after recording")
+        }
+        if ch.Viewers > 0 {
+                ch.Info("status: %d viewers", ch.Viewers)
+        }
+        if ch.RoomTitle != "" {
+                title := ch.RoomTitle
+                if len(title) > 80 {
+                        title = title[:80] + "…"
+                }
+                ch.Info("status: room title: %s", title)
         }
 
         return playlist.WatchAVSegments(ctx, ch.HandleSegment, ch.HandleInitSegment, ch.HandleAudioSegment, ch.HandleAudioInitSegment, ch.OnPollComplete)
@@ -261,15 +271,15 @@ func (ch *Channel) OnPollComplete() error {
 
 // HandleAudioSegment processes and writes audio segment data to a sidecar file.
 func (ch *Channel) HandleAudioSegment(b []byte, duration float64) error {
-	if ch.AudioFile == nil {
-		return nil
-	}
-	if ch.Config.IsPaused.Load() {
-		return retry.Unrecoverable(internal.ErrPaused)
-	}
+        if ch.AudioFile == nil {
+                return nil
+        }
+        if ch.Config.IsPaused.Load() {
+                return retry.Unrecoverable(internal.ErrPaused)
+        }
 
-	if _, err := ch.AudioFile.Write(b); err != nil {
-		return fmt.Errorf("write audio file: %w", err)
-	}
-	return nil
+        if _, err := ch.AudioFile.Write(b); err != nil {
+                return fmt.Errorf("write audio file: %w", err)
+        }
+        return nil
 }

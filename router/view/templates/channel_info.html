@@ -40,13 +40,21 @@
   <!-- Name + Status -->
   <div class="flex items-center justify-between gap-2 mb-1">
     <div class="text-sm font-bold text-zinc-100 truncate">{{ .Username }}</div>
-    {{ if and .IsOnline (not .IsPaused) }}
-    <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[9px] font-bold rounded-full uppercase tracking-wider shrink-0 badge-recording">Recording</span>
-    {{ else if .IsPaused }}
-    <span class="inline-flex items-center px-2 py-0.5 text-[9px] font-bold rounded-full uppercase shrink-0 badge-paused">{{ if .RoomStatus }}{{ .RoomStatus }}{{ else }}Paused{{ end }}</span>
-    {{ else }}
-    <span class="inline-flex items-center px-2 py-0.5 text-[9px] font-bold rounded-full uppercase shrink-0 {{ if eq .RoomStatus "private" }}text-violet-400{{ else if eq .RoomStatus "away" }}text-amber-400{{ else }}badge-offline{{ end }}" style="{{ if eq .RoomStatus "private" }}background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.2){{ else if eq .RoomStatus "away" }}background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.2){{ else }}background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08){{ end }}">{{ if .RoomStatus }}{{ .RoomStatus }}{{ else }}Offline{{ end }}</span>
-    {{ end }}
+    <div class="flex items-center gap-1 shrink-0">
+      {{ if .IsCompressing }}
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[9px] font-bold rounded-full uppercase tracking-wider shrink-0" style="background:rgba(192,132,252,0.12);border:1px solid rgba(192,132,252,0.25);color:#c084fc">
+        <svg class="w-2.5 h-2.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="31.4" stroke-dashoffset="10"/></svg>
+        Encoding
+      </span>
+      {{ end }}
+      {{ if and .IsOnline (not .IsPaused) }}
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[9px] font-bold rounded-full uppercase tracking-wider badge-recording">Recording</span>
+      {{ else if .IsPaused }}
+      <span class="inline-flex items-center px-2 py-0.5 text-[9px] font-bold rounded-full uppercase badge-paused">{{ if .RoomStatus }}{{ .RoomStatus }}{{ else }}Paused{{ end }}</span>
+      {{ else }}
+      <span class="inline-flex items-center px-2 py-0.5 text-[9px] font-bold rounded-full uppercase {{ if eq .RoomStatus "private" }}text-violet-400{{ else if eq .RoomStatus "away" }}text-amber-400{{ else }}badge-offline{{ end }}" style="{{ if eq .RoomStatus "private" }}background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.2){{ else if eq .RoomStatus "away" }}background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.2){{ else }}background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08){{ end }}">{{ if .RoomStatus }}{{ .RoomStatus }}{{ else }}Offline{{ end }}</span>
+      {{ end }}
+    </div>
   </div>
 
   <div class="mt-4 mb-4 info-divider" style="height:1px"></div>
