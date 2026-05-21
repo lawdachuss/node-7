@@ -198,6 +198,26 @@ func Download(c *gin.Context) {
         c.FileAttachment(abs, filepath.Base(abs))
 }
 
+// DeleteVideoRecord removes only the Supabase DB records for an uploaded-only video
+// (no local file to delete).
+func DeleteVideoRecord(c *gin.Context) {
+        filename := c.PostForm("filename")
+        if filename == "" {
+                c.Redirect(http.StatusFound, "/videos")
+                return
+        }
+        // Sanitize: only the base name is accepted, never a path
+        filename = filepath.Base(filename)
+        if filename == "." || filename == "" {
+                c.Redirect(http.StatusFound, "/videos")
+                return
+        }
+        if err := server.DeleteVideoCompletely(filename); err != nil {
+                fmt.Printf("[ERROR] delete video DB records for %s: %v\n", filename, err)
+        }
+        c.Redirect(http.StatusFound, "/videos")
+}
+
 // DeleteVideo removes a video file from disk and all associated data from Supabase.
 func DeleteVideo(c *gin.Context) {
         path := c.PostForm("path")
@@ -410,9 +430,12 @@ func VideoDetail(c *gin.Context) {
                         Framerate:   framerate,
                         ModTimeSort: timestamp,
                 }
-                recommendations := getRecommendations(currentVideo, allVideos, 8)
-                // Convert VideoEntry to RecordingEntry for template
+                recommendations := getRecommendations(currentVideo, allVideos, 12)
+                // Only include same-channel videos for "More from [username]" section
                 for _, v := range recommendations {
+                        if !strings.EqualFold(v.Username, username) {
+                                continue
+                        }
                         related = append(related, RecordingEntry{
                                 Filename:     v.Filename,
                                 FullPath:     v.FullPath,
@@ -425,6 +448,9 @@ func VideoDetail(c *gin.Context) {
                                 ThumbnailURL: v.ThumbnailURL,
                                 SpriteURL:    v.SpriteURL,
                         })
+                        if len(related) >= 8 {
+                                break
+                        }
                 }
         }
 
@@ -547,30 +573,30 @@ func buildHostPlayers(links map[string]string, byseAPIKey string) []hostPlayer {
 }
 
 func embedURLForHostLink(host, link, byseAPIKey string) string {
-	if link == "" {
-		return ""
-	}
-	normalizedHost := strings.ToLower(host)
-	normalizedLink := strings.ToLower(link)
+        if link == "" {
+                return ""
+        }
+        normalizedHost := strings.ToLower(host)
+        normalizedLink := strings.ToLower(link)
 
-	// Handle both Byse download URLs (/d/) and embed URLs (/e/)
-	if strings.Contains(normalizedHost, "byse") || 
-	   strings.Contains(normalizedLink, "byse.sx/d/") || 
-	   strings.Contains(normalizedLink, "byse.sx/e/") ||
-	   strings.Contains(normalizedLink, "api.byse.sx/e/") {
-		if code := extractFileCode(link); code != "" {
-			return byseEmbedURL(code, byseAPIKey)
-		}
-	}
-	if strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.cm/") || strings.Contains(normalizedLink, "send.now/") {
-		return ""
-	}
-	if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
-		if code := extractFileCode(link); code != "" {
-			return "https://voe.sx/e/" + code
-		}
-	}
-	return ""
+        // Handle both Byse download URLs (/d/) and embed URLs (/e/)
+        if strings.Contains(normalizedHost, "byse") || 
+           strings.Contains(normalizedLink, "byse.sx/d/") || 
+           strings.Contains(normalizedLink, "byse.sx/e/") ||
+           strings.Contains(normalizedLink, "api.byse.sx/e/") {
+                if code := extractFileCode(link); code != "" {
+                        return byseEmbedURL(code, byseAPIKey)
+                }
+        }
+        if strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.cm/") || strings.Contains(normalizedLink, "send.now/") {
+                return ""
+        }
+        if strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/") {
+                if code := extractFileCode(link); code != "" {
+                        return "https://voe.sx/e/" + code
+                }
+        }
+        return ""
 }
 
 func byseEmbedURL(fileCode, apiKey string) string {
@@ -646,24 +672,24 @@ func videoURLForHostLink(host, link string) string {
         normalizedHost := strings.ToLower(host)
         normalizedLink := strings.ToLower(link)
 
-	switch {
-	case strings.Contains(normalizedHost, "byse") || strings.Contains(normalizedLink, "byse.sx/") || strings.Contains(normalizedLink, "filemoon.sx/"):
-		if code := extractFileCode(link); code != "" {
-			return "https://filemoon.sx/e/" + code
-		}
-		return link
-	case strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/"):
-		if code := extractFileCode(link); code != "" {
-			return "https://voe.sx/e/" + code
-		}
-		return link
-	case strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.now/"):
-		return link
-	case strings.Contains(normalizedHost, "turboviplay") || strings.Contains(normalizedLink, "emturbovid.com/") || strings.Contains(normalizedLink, "turboviplay.com/"):
-		return link
-	default:
-		return ""
-	}
+        switch {
+        case strings.Contains(normalizedHost, "byse") || strings.Contains(normalizedLink, "byse.sx/") || strings.Contains(normalizedLink, "filemoon.sx/"):
+                if code := extractFileCode(link); code != "" {
+                        return "https://filemoon.sx/e/" + code
+                }
+                return link
+        case strings.Contains(normalizedHost, "voe") || strings.Contains(normalizedLink, "voe.sx/"):
+                if code := extractFileCode(link); code != "" {
+                        return "https://voe.sx/e/" + code
+                }
+                return link
+        case strings.Contains(normalizedHost, "sendcm") || strings.Contains(normalizedLink, "send.now/"):
+                return link
+        case strings.Contains(normalizedHost, "turboviplay") || strings.Contains(normalizedLink, "emturbovid.com/") || strings.Contains(normalizedLink, "turboviplay.com/"):
+                return link
+        default:
+                return ""
+        }
 }
 
 // ─── Tunnel API ──────────────────────────────────────────────────────────────
