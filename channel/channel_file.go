@@ -255,10 +255,15 @@ func (ch *Channel) MoveToOutputDir(srcPath string) string {
 		go func() {
 			defer ch.UploadWg.Done()
 			defer MarkUploadDone(filePath)
-			thumbURL, spriteURL, previewURL := ch.generateThumbnail(filePath)
+			defer func() {
+				if r := recover(); r != nil {
+					ch.Error("upload: panic in upload goroutine for %s: %v", filepath.Base(filePath), r)
+				}
+			}()
 			UploadSem <- struct{}{}
 			ch.uploadSem <- struct{}{}
 			defer func() { <-ch.uploadSem; <-UploadSem }()
+			thumbURL, spriteURL, previewURL := ch.generateThumbnail(filePath)
 			ch.uploadFile(filePath, thumbURL, spriteURL, previewURL)
 		}()
 	}
@@ -919,8 +924,8 @@ func UploadOrphanedFile(filePath, thumbURL, spriteURL, previewURL string) bool {
 		recoveryLogf(filename, "saved recording metadata")
 	}
 
-	// Delete local file after successful upload + DB save
-	if cfg.DeleteLocalAfterUpload {
+	// Delete local file only once ALL hosts have the file safely.
+	if cfg.DeleteLocalAfterUpload && len(success) >= len(allHosts) {
 		os.Remove(filePath)
 		DeleteSidecarFiles(filePath)
 		if fileHash != "" {
