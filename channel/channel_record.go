@@ -58,7 +58,7 @@ func (ch *Channel) Monitor() {
 				}
 
 				// NOTE: no extra Cleanup call here.
-				// RecordStream's deferred Cleanup(false) always runs before
+				// RecordStream's deferred Cleanup(CloseProcess) always runs before
 				// onRetry is called (defers execute before the function returns
 				// to the retry loop). ch.File is therefore always nil at this
 				// point. Launching a goroutine here was redundant dead-code and
@@ -110,8 +110,10 @@ func (ch *Channel) Monitor() {
 		}
 	}
 
-	// Always cleanup when monitor exits, regardless of error
-	if err := ch.Cleanup(false); err != nil {
+	// Always cleanup when monitor exits, regardless of error.
+	// Use CloseQueue — files will be processed by the caller
+	// (session loop via ProcessPending, or StopChannel via ProcessPending).
+	if err := ch.Cleanup(CloseQueue); err != nil {
 		ch.Error("cleanup on monitor exit: %s", err.Error())
 	}
 
@@ -175,7 +177,11 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 
 	// Ensure file is cleaned up when this function exits in any case
 	defer func() {
-		if err := ch.Cleanup(false); err != nil {
+		mode := CloseProcess
+		if ctx.Err() != nil {
+			mode = CloseQueue // session stop — queue for batched processing
+		}
+		if err := ch.Cleanup(mode); err != nil {
 			ch.Error("cleanup on record stream exit: %s", err.Error())
 		}
 	}()

@@ -32,9 +32,18 @@ type Pattern struct {
         Second   string
 }
 
+// CloseMode controls whether Cleanup processes pending files immediately
+// or defers processing for later (batched session stop).
+type CloseMode int
+
+const (
+	CloseProcess CloseMode = iota // close files + process pending (rotation, pause, stream error)
+	CloseQueue                    // close files only, defer processing to ProcessPending (session stop)
+)
+
 // NextFile prepares the next file to be created, by cleaning up the last file and generating a new one
 func (ch *Channel) NextFile() error {
-        if err := ch.Cleanup(true); err != nil {
+        if err := ch.Cleanup(CloseProcess); err != nil {
                 return err
         }
         filename, err := ch.GenerateFilename()
@@ -56,10 +65,10 @@ func (ch *Channel) NextFile() error {
         return nil
 }
 
-// Cleanup closes any open recording files and either queues them for later
-// post-processing (isRotation=true, during file rotation) or processes the
-// entire pending queue (isRotation=false, when the session ends).
-func (ch *Channel) Cleanup(isRotation bool) error {
+// Cleanup closes any open recording files.
+// CloseProcess: also mux/compress/upload pending files immediately (rotation, pause, stream error).
+// CloseQueue:   only close and queue files; caller must call ProcessPending() later (session stop).
+func (ch *Channel) Cleanup(mode CloseMode) error {
         ch.cleanupMu.Lock()
         defer ch.cleanupMu.Unlock()
 
@@ -103,7 +112,7 @@ func (ch *Channel) Cleanup(isRotation bool) error {
 				} else if audioPath != "" {
 					os.Remove(audioPath)
 				}
-				if !isRotation {
+				if mode == CloseProcess {
 					ch.processPendingQueue()
 				}
 				return nil
@@ -115,7 +124,7 @@ func (ch *Channel) Cleanup(isRotation bool) error {
 				} else if videoPath != "" {
 					os.Remove(videoPath) // closeTrackedFile failed to remove it above
 				}
-				if !isRotation {
+				if mode == CloseProcess {
 					ch.processPendingQueue()
 				} else if len(ch.pendingFiles) > 10 {
 					ch.Warn("cleanup: %d pending files accumulated during rotation — will be processed when recording ends", len(ch.pendingFiles))
@@ -137,7 +146,9 @@ func (ch *Channel) Cleanup(isRotation bool) error {
 		}
 	}
 
-        ch.processPendingQueue()
+        if mode == CloseProcess {
+                ch.processPendingQueue()
+        }
         return nil
 }
 

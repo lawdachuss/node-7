@@ -250,7 +250,7 @@ func (ch *Channel) Pause() {
 	// Finalize any in-progress files immediately so they can be uploaded
 	// and removed when `DeleteLocalAfterUpload` is enabled.
 	go func() {
-		if err := ch.Cleanup(false); err != nil {
+		if err := ch.Cleanup(CloseProcess); err != nil {
 			ch.Error("cleanup on pause: %s", err.Error())
 		}
 	}()
@@ -315,6 +315,18 @@ func (ch *Channel) Resume(_ int) {
 // files have been queued into UploadWg.
 func (ch *Channel) WaitMonitor() {
 	ch.monitorWg.Wait()
+}
+
+// ProcessPending muxes, compresses, and uploads all queued pending files.
+// Blocks until all uploads (including those from previous file rotations)
+// complete.  Call after WaitMonitor when Cleanup was called with CloseQueue.
+func (ch *Channel) ProcessPending() {
+	ch.cleanupMu.Lock()
+	if len(ch.pendingFiles) > 0 {
+		ch.processPendingQueue()
+	}
+	ch.cleanupMu.Unlock()
+	ch.UploadWg.Wait()
 }
 
 // UpdateOnlineStatus updates the online status of the channel.

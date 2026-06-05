@@ -361,7 +361,10 @@ func (m *Manager) StopChannel(username string) error {
 	// The channels table row is intentionally left orphaned because it is shared
 	// across instances and no longer read by LoadChannelsFromDB.
 	go func() {
-		thing.(*channel.Channel).Stop()
+		ch := thing.(*channel.Channel)
+		ch.Stop()
+		ch.WaitMonitor()  // wait for Monitor to exit + Cleanup(CloseQueue) to queue files
+		ch.ProcessPending() // mux/compress/upload queued files
 	}()
 
 	return nil
@@ -460,6 +463,81 @@ func (m *Manager) StartWatcher() {
 	}()
 }
 
+// StopWithProcessingQueue cancels all channels and processes their queued
+// recordings in batches using a limited number of workers.  Each worker
+// processes one channel at a time (mux all pending files, wait for all
+// uploads) so CPU, disk, and network contention is minimised.
+func (m *Manager) StopWithProcessingQueue(workers int) {
+	var chs []*channel.Channel
+	m.Channels.Range(func(key, value any) bool {
+		chs = append(chs, value.(*channel.Channel))
+		return true
+	})
+
+	m.CancelAllChannels() // all stop recording now (fair)
+	m.StopWatcher()
+
+	log.Printf("[session] waiting for %d channels to close recordings...", len(chs))
+	m.WaitForAllChannels() // monitors exit → Cleanup(CloseQueue) → fast file close, no processing
+
+	if len(chs) == 0 {
+		return
+	}
+
+	log.Printf("[session] processing %d channels with %d worker(s)...", len(chs), workers)
+
+	// Progress ticker
+	processingDone := make(chan struct{})
+	defer close(processingDone)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		elapsed := 0
+		for {
+			select {
+			case <-ticker.C:
+				elapsed += 30
+				log.Printf("[session] still processing... (%ds elapsed)", elapsed)
+			case <-processingDone:
+				return
+			}
+		}
+	}()
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	for _, ch := range chs {
+		sem <- struct{}{} // acquire worker slot (blocks if all workers busy)
+		wg.Add(1)
+		go func(ch *channel.Channel) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[session] PANIC processing channel %s: %v", ch.Config.Username, r)
+				}
+			}()
+			start := time.Now()
+			log.Printf("[session] processing channel %s...", ch.Config.Username)
+			ch.ProcessPending()
+			log.Printf("[session] channel %s done in %v", ch.Config.Username, time.Since(start).Round(time.Second))
+		}(ch)
+	}
+
+	// Wait for all workers with a global timeout (same as pre-queue behaviour).
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
+	}()
+	select {
+	case <-waitCh:
+	case <-time.After(10 * time.Minute):
+		log.Println("[session] WARN: queue processing timed out after 10 minutes — proceeding anyway")
+	}
+}
+
 // StartSession begins the automatic recording-session lifecycle.
 // If duration is <= 0 this is a no-op (continuous recording).
 // The session loop: record for duration → cancel all channels →
@@ -479,107 +557,73 @@ func (m *Manager) StartSession(d time.Duration) {
 }
 
 func (m *Manager) sessionLoop(d time.Duration) {
-	for {
-		channels := m.channelCount()
-		if channels == 0 {
-			m.sessionDeadlineMu.Lock()
-			m.sessionDeadline = time.Time{}
-			m.sessionDuration = 0
-			m.sessionDeadlineMu.Unlock()
-			log.Println("[session] no channels to record — stopping session loop")
-			m.sessionMu.Lock()
-			m.sessionStarted = false
-			m.sessionMu.Unlock()
-			return
-		}
-		log.Printf("[session] recording session started — next stop in %s with %d channel(s)", d, channels)
-
-		deadline := time.Now().Add(d)
-		m.sessionDeadlineMu.Lock()
-		m.sessionDeadline = deadline
-		m.sessionDuration = d
-		m.sessionDeadlineMu.Unlock()
-
-		stopCh := make(chan struct{}, 1)
-		m.sessionStopMu.Lock()
-		m.sessionStopCh = stopCh
-		m.sessionStopMu.Unlock()
-
-		timer := time.NewTimer(d)
-		progress := time.NewTicker(30 * time.Minute)
-
-	sessionWait:
-		for {
-			select {
-			case <-timer.C:
-				progress.Stop()
-				break sessionWait
-			case <-stopCh:
-				progress.Stop()
-				if !timer.Stop() {
-					<-timer.C
-				}
-				log.Println("[session] manual stop triggered")
-				break sessionWait
-			case <-progress.C:
-				remaining := time.Until(deadline)
-				if remaining > 0 {
-					log.Printf("[session] %s remaining in recording session", remaining.Round(time.Second))
-				}
-			}
-		}
-
-		m.sessionStopMu.Lock()
-		m.sessionStopCh = nil
-		m.sessionStopMu.Unlock()
-
-		log.Println("[session] duration reached — stopping all channels")
-
+	channels := m.channelCount()
+	if channels == 0 {
 		m.sessionDeadlineMu.Lock()
 		m.sessionDeadline = time.Time{}
 		m.sessionDuration = 0
 		m.sessionDeadlineMu.Unlock()
-
-		m.CancelAllChannels()
-		m.StopWatcher()
-
-		log.Println("[session] waiting for recordings to finalize...")
-		m.WaitForAllChannels()
-
-		processingDone := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			elapsed := 30
-			for {
-				select {
-				case <-ticker.C:
-					log.Printf("[session] still finalizing... (%ds elapsed)", elapsed)
-					elapsed += 30
-				case <-processingDone:
-					return
-				}
-			}
-		}()
-
-		log.Println("[session] waiting for mux/thumbnail/upload/Supabase to complete...")
-		waitDone := make(chan struct{})
-		go func() {
-			m.WaitForUploads()
-			close(waitDone)
-		}()
-		select {
-		case <-waitDone:
-		case <-time.After(10 * time.Minute):
-			log.Println("[session] WARN: WaitForUploads timed out after 10 minutes — proceeding anyway")
-		}
-		close(processingDone)
-
-		log.Println("[session] all processing complete — restarting recording session")
-
-		m.ResumeAllChannels()
-		m.StartWatcher()
+		log.Println("[session] no channels to record — stopping session loop")
+		m.sessionMu.Lock()
+		m.sessionStarted = false
+		m.sessionMu.Unlock()
+		return
 	}
+	log.Printf("[session] recording session started — next stop in %s with %d channel(s)", d, channels)
+
+	deadline := time.Now().Add(d)
+	m.sessionDeadlineMu.Lock()
+	m.sessionDeadline = deadline
+	m.sessionDuration = d
+	m.sessionDeadlineMu.Unlock()
+
+	stopCh := make(chan struct{}, 1)
+	m.sessionStopMu.Lock()
+	m.sessionStopCh = stopCh
+	m.sessionStopMu.Unlock()
+
+	timer := time.NewTimer(d)
+	progress := time.NewTicker(30 * time.Minute)
+
+sessionWait:
+	for {
+		select {
+		case <-timer.C:
+			progress.Stop()
+			break sessionWait
+		case <-stopCh:
+			progress.Stop()
+			if !timer.Stop() {
+				<-timer.C
+			}
+			log.Println("[session] manual stop triggered")
+			break sessionWait
+		case <-progress.C:
+			remaining := time.Until(deadline)
+			if remaining > 0 {
+				log.Printf("[session] %s remaining in recording session", remaining.Round(time.Second))
+			}
+		}
+	}
+
+	m.sessionStopMu.Lock()
+	m.sessionStopCh = nil
+	m.sessionStopMu.Unlock()
+
+	log.Println("[session] duration reached — stopping all channels")
+
+	m.sessionDeadlineMu.Lock()
+	m.sessionDeadline = time.Time{}
+	m.sessionDuration = 0
+	m.sessionDeadlineMu.Unlock()
+
+	m.StopWithProcessingQueue(10)
+
+	log.Println("[session] all processing complete — session ended")
+
+	m.sessionMu.Lock()
+	m.sessionStarted = false
+	m.sessionMu.Unlock()
 }
 
 // IsFileUploadInFlight returns true if the given file path is currently
