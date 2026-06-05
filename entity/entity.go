@@ -17,15 +17,16 @@ const (
 
 // ChannelConfig represents the configuration for a channel.
 type ChannelConfig struct {
-	IsPaused    atomic.Bool `json:"-"`
-	Username    string      `json:"username"`
-	Framerate   int         `json:"framerate"`
-	Resolution  int         `json:"resolution"`
-	Pattern     string      `json:"pattern"`
-	MaxDuration int         `json:"max_duration"`
-	MaxFilesize int         `json:"max_filesize"`
-	Compress    bool        `json:"compress"`
-	CreatedAt   int64       `json:"created_at"`
+	IsPaused                  atomic.Bool `json:"-"`
+	Username                  string      `json:"username"`
+	Framerate                 int         `json:"framerate"`
+	Resolution                int         `json:"resolution"`
+	Pattern                   string      `json:"pattern"`
+	MaxDuration               int         `json:"max_duration"`
+	MaxFilesize               int         `json:"max_filesize"`
+	Compress                  bool        `json:"compress"`
+	MinDurationBeforeUpload   int         `json:"min_duration_before_upload"` // seconds; 0 = disabled
+	CreatedAt                 int64       `json:"created_at"`
 }
 
 func (c *ChannelConfig) Sanitize() {
@@ -102,6 +103,7 @@ type Config struct {
 	OutputDir               string
 	PerModelFolder          bool
 	DeleteLocalAfterUpload  bool
+	MinDurationBeforeUpload  int  // seconds; 0 = disabled; videos shorter than this are deferred for merge
 	OrphanCleanupInterval   int  // minutes between periodic orphan/thumbnail sweeps (0 = disabled)
 	DiskWarningPercent      int  // log warning when disk usage exceeds this (0 = disabled, default 80)
 	DiskCriticalPercent     int  // auto-delete oldest recordings when disk exceeds this (0 = disabled, default 90)
