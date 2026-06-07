@@ -184,7 +184,7 @@ func (p *Playlist) processMediaPlaylist(ctx context.Context, client *internal.Re
 	}
 
 	if !*initWritten && playlist.Map != nil && playlist.Map.URI != "" {
-		initURL := resolveURL(playlistURL, playlist.Map.URI)
+		initURL := appendPKey(resolveURL(playlistURL, playlist.Map.URI), p.PKey)
 		initData, initErr := retry.DoWithData(
 			func() ([]byte, error) {
 				return client.GetBytes(ctx, initURL)
@@ -215,7 +215,7 @@ func (p *Playlist) processMediaPlaylist(ctx context.Context, client *internal.Re
 			continue
 		}
 
-		segmentURL := resolveURL(playlistURL, v.URI)
+		segmentURL := appendPKey(resolveURL(playlistURL, v.URI), p.PKey)
 		resp, err := retry.DoWithData(
 			func() ([]byte, error) {
 				return client.GetBytes(ctx, segmentURL)
@@ -346,6 +346,21 @@ func resolveURL(baseURL, ref string) string {
 		return ref
 	}
 	return base.ResolveReference(refURL).String()
+}
+
+func appendPKey(u, pkey string) string {
+	if pkey == "" || u == "" {
+		return u
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	q := parsed.Query()
+	q.Set("psch", "v2")
+	q.Set("pkey", pkey)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 func resolveBaseURL(hlsSource string) string {

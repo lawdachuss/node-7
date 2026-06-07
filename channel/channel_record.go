@@ -375,7 +375,7 @@ func (ch *Channel) watchWithGraceSC(ctx context.Context, client *internal.Req, p
 			ch.stateMu.Unlock()
 		}
 
-		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, info.HLSSource, p.PDKey, ch.Config.Resolution, ch.Config.Framerate)
+		newPlaylist, apiErr := stripchat.FetchPlaylist(ctx, client, info.HLSSource, "", ch.Config.Resolution, ch.Config.Framerate)
 		if apiErr != nil {
 			continue
 		}

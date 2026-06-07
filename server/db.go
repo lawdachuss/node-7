@@ -527,8 +527,14 @@ func SaveRecordingWithLinks(username, filename, timestamp, roomTitle string, tag
 	// and the FK would point to the wrong instance's row.
 	// Recordings are uniquely identified by filename, so channel_id is cosmetic.
 
-	// Save recording first
-        if err := client.SaveRecording(rec); err != nil {
+	// Save recording first (try with duration, fall back without if column missing)
+        if err := client.SaveRecording(rec); err != nil && strings.Contains(err.Error(), "PGRST204") {
+                fmt.Printf("[WARN] duration column missing in Supabase — saving without duration: %v\n", err)
+                rec.Duration = 0
+                if err := client.SaveRecording(rec); err != nil {
+                        return fmt.Errorf("save recording (fallback): %w", err)
+                }
+        } else if err != nil {
                 return fmt.Errorf("save recording: %w", err)
         }
 
