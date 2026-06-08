@@ -66,7 +66,7 @@ func (ch *Channel) NextFile() error {
 }
 
 // Cleanup closes any open recording files.
-// CloseProcess: also mux/compress/upload pending files immediately (rotation, pause, stream error).
+// CloseProcess: also mux/compress/upload pending files asynchronously (rotation, pause, stream error).
 // CloseQueue:   only close and queue files; caller must call ProcessPending() later (session stop).
 func (ch *Channel) Cleanup(mode CloseMode) error {
 	ch.cleanupMu.Lock()
@@ -76,7 +76,7 @@ func (ch *Channel) Cleanup(mode CloseMode) error {
 		return nil
 	}
 
-	// Close any open files and add them to the pending queue.
+	// Close any open files and add them to the pending queue (or remove empty ones).
 	// Errors from closeTrackedFile are logged but not returned — aborting
 	// would strand ALL previously queued pendingFiles permanently.
 	if ch.File != nil || ch.AudioFile != nil {
@@ -100,56 +100,54 @@ func (ch *Channel) Cleanup(mode CloseMode) error {
 		ch.stateMu.Unlock()
 
 		// Remove files that contain only init segments with no media data.
-		if ch.HasSeparateAudio {
-			if !hasVideo && !hasAudio {
-				if videoInfo != nil {
-					os.Remove(videoPath)
-				} else if videoPath != "" {
-					os.Remove(videoPath) // closeTrackedFile failed to remove it above
-				}
-				if audioInfo != nil {
-					os.Remove(audioPath)
-				} else if audioPath != "" {
-					os.Remove(audioPath)
-				}
-				if mode == CloseProcess {
-					ch.processPendingQueue()
-				}
-				return nil
+		if ch.HasSeparateAudio && !hasVideo && !hasAudio {
+			if videoInfo != nil {
+				os.Remove(videoPath)
+			} else if videoPath != "" {
+				os.Remove(videoPath)
+			}
+			if audioInfo != nil {
+				os.Remove(audioPath)
+			} else if audioPath != "" {
+				os.Remove(audioPath)
+			}
+		} else if !ch.HasSeparateAudio && !hasVideo {
+			if videoInfo != nil {
+				os.Remove(videoPath)
+			} else if videoPath != "" {
+				os.Remove(videoPath)
+			}
+			if mode == CloseQueue && len(ch.pendingFiles) > 10 {
+				ch.Warn("cleanup: %d pending files accumulated during rotation — will be processed when recording ends", len(ch.pendingFiles))
 			}
 		} else {
-			if !hasVideo {
-				if videoInfo != nil {
-					os.Remove(videoPath)
-				} else if videoPath != "" {
-					os.Remove(videoPath) // closeTrackedFile failed to remove it above
-				}
-				if mode == CloseProcess {
-					ch.processPendingQueue()
-				} else if len(ch.pendingFiles) > 10 {
-					ch.Warn("cleanup: %d pending files accumulated during rotation — will be processed when recording ends", len(ch.pendingFiles))
-				}
-				return nil
+			ch.stateMu.Lock()
+			hasSeparateAudio := ch.HasSeparateAudio
+			ch.stateMu.Unlock()
+			ch.pendingFiles = append(ch.pendingFiles, pendingFile{
+				videoPath:        videoPath,
+				audioPath:        audioPath,
+				hasSeparateAudio: hasSeparateAudio,
+				skipMinDuration:  ch.Config.IsPaused.Load(),
+			})
+			if videoPath != "" {
+				ch.Info("cleanup: queued %s for post-processing (%d pending)", filepath.Base(videoPath), len(ch.pendingFiles))
+			} else if audioPath != "" {
+				ch.Info("cleanup: queued %s for post-processing (%d pending)", filepath.Base(audioPath), len(ch.pendingFiles))
 			}
-		}
-
-		ch.stateMu.Lock()
-		hasSeparateAudio := ch.HasSeparateAudio
-		ch.stateMu.Unlock()
-		ch.pendingFiles = append(ch.pendingFiles, pendingFile{
-			videoPath:        videoPath,
-			audioPath:        audioPath,
-			hasSeparateAudio: hasSeparateAudio,
-		})
-		if videoPath != "" {
-			ch.Info("cleanup: queued %s for post-processing (%d pending)", filepath.Base(videoPath), len(ch.pendingFiles))
-		} else if audioPath != "" {
-			ch.Info("cleanup: queued %s for post-processing (%d pending)", filepath.Base(audioPath), len(ch.pendingFiles))
 		}
 	}
 
-	if mode == CloseProcess {
-		ch.processPendingQueue()
+	if mode == CloseProcess && len(ch.pendingFiles) > 0 {
+		files := ch.pendingFiles
+		ch.pendingFiles = nil
+		ch.pendingWg.Add(1)
+		go func() {
+			defer ch.pendingWg.Done()
+			for _, pf := range files {
+				ch.processPendingFile(pf)
+			}
+		}()
 	}
 	return nil
 }
@@ -174,19 +172,19 @@ func (ch *Channel) processPendingFile(pf pendingFile) {
 	audioPath := pf.audioPath
 
 	if pf.hasSeparateAudio && audioPath != "" {
-		ch.processPendingMuxPair(videoPath, audioPath)
+		ch.processPendingMuxPair(videoPath, audioPath, pf.skipMinDuration)
 		return
 	}
 
 	// Single-stream file — move to output dir (triggers preview + upload).
 	if _, err := os.Stat(videoPath); err == nil {
 		if ch.Config.Compress {
-			if ch.handleMinDurationAndMerge(videoPath) {
+			if !pf.skipMinDuration && ch.handleMinDurationAndMerge(videoPath) {
 				return // video was deferred to pending or merged+uploaded
 			}
 			ch.CompressFile(videoPath)
 			return
-		} else if ch.handleMinDurationAndMerge(videoPath) {
+		} else if !pf.skipMinDuration && ch.handleMinDurationAndMerge(videoPath) {
 			return // video was deferred to pending or merged+uploaded
 		} else {
 			// Normalize fMP4 timestamps: Stripchat's LL-HLS segments carry
@@ -199,7 +197,7 @@ func (ch *Channel) processPendingFile(pf pendingFile) {
 	}
 }
 
-func (ch *Channel) processPendingMuxPair(videoPath, audioPath string) {
+func (ch *Channel) processPendingMuxPair(videoPath, audioPath string, skipMinDuration bool) {
 	videoInfo, _ := os.Stat(videoPath)
 	audioInfo, _ := os.Stat(audioPath)
 
@@ -208,7 +206,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string) {
 		return
 	case videoInfo == nil:
 		ch.Info("mux: video track missing; preserving audio-only file %s", filepath.Base(audioPath))
-		if ch.handleMinDurationAndMerge(audioPath) {
+		if !skipMinDuration && ch.handleMinDurationAndMerge(audioPath) {
 			return
 		}
 		if ch.Config.Compress {
@@ -219,7 +217,7 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string) {
 		return
 	case audioInfo == nil:
 		ch.Info("mux: audio track missing; preserving video-only file %s", filepath.Base(videoPath))
-		if ch.handleMinDurationAndMerge(videoPath) {
+		if !skipMinDuration && ch.handleMinDurationAndMerge(videoPath) {
 			return
 		}
 		if ch.Config.Compress {
@@ -257,11 +255,11 @@ func (ch *Channel) processPendingMuxPair(videoPath, audioPath string) {
 	ch.Info("delete: removed sidecar %s", filepath.Base(audioPath))
 
 	if ch.Config.Compress {
-		if ch.handleMinDurationAndMerge(finalOutput) {
+		if !skipMinDuration && ch.handleMinDurationAndMerge(finalOutput) {
 			return // video was deferred to pending or merged+uploaded
 		}
 		ch.CompressFile(finalOutput)
-	} else if ch.handleMinDurationAndMerge(finalOutput) {
+	} else if !skipMinDuration && ch.handleMinDurationAndMerge(finalOutput) {
 		return // video was deferred to pending or merged+uploaded
 	} else {
 		ch.MoveToOutputDir(finalOutput)
@@ -1160,8 +1158,9 @@ func mergeVideos(inputs []string, outputPath string) error {
 }
 
 // handleMinDurationAndMerge checks whether a finalized video file meets the
-// minimum-duration threshold.  If the feature is disabled or the channel is
-// paused the check is skipped and the caller proceeds to upload normally.
+// minimum-duration threshold.  If the feature is disabled the check is skipped
+// and the caller proceeds to upload normally.  Callers should skip this
+// function entirely when skipMinDuration is set (channel pause).
 //
 // When a video is shorter than the threshold it is moved into a pending
 // directory.  If pending segments already exist (including the one just moved),

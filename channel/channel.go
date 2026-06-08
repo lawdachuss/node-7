@@ -23,6 +23,7 @@ type pendingFile struct {
 	videoPath        string
 	audioPath        string // empty if no separate audio
 	hasSeparateAudio bool   // captured at queue-time so file-level A/V pairing survives stream config changes
+	skipMinDuration  bool   // when true, bypass the minimum-duration threshold (used on pause)
 }
 
 // Channel represents a channel instance.
@@ -70,6 +71,7 @@ type Channel struct {
 	audioSegmentCount int        // tracks audio segments written to current file
 	cleanupMu         sync.Mutex // serialises Cleanup() calls from concurrent goroutines
 	pendingFiles      []pendingFile
+	pendingWg         sync.WaitGroup // tracks async pending-file processing goroutine
 	UploadWg          sync.WaitGroup // tracks in-flight upload goroutines for graceful shutdown
 	monitorWg         sync.WaitGroup // tracks the Monitor goroutine lifetime
 	uploadSem         chan struct{}  // per-channel upload semaphore (1 at a time)
@@ -325,11 +327,10 @@ func (ch *Channel) exportInfo(includeLogs bool) *entity.ChannelInfo {
 func (ch *Channel) Pause() {
 	// Stop the monitoring loop and hand over to CheckOnlineWhilePaused
 	// which will poll the API to keep RoomStatus and IsOnline up to date.
+	ch.Config.IsPaused.Store(true)
 	ch.cancelMu.Lock()
 	ch.CancelFunc()
 	ch.cancelMu.Unlock()
-
-	ch.Config.IsPaused.Store(true)
 	ch.Update()
 	ch.Info("channel paused")
 
@@ -412,10 +413,17 @@ func (ch *Channel) WaitMonitor() {
 	ch.monitorWg.Wait()
 }
 
-// ProcessPending muxes, compresses, and uploads all queued pending files.
+// ProcessPending waits for any in-flight async processing from Cleanup(CloseProcess)
+// to finish, then muxes/compresses/uploads any queued pending files.
 // Blocks until all uploads (including those from previous file rotations)
 // complete.  Call after WaitMonitor when Cleanup was called with CloseQueue.
 func (ch *Channel) ProcessPending() {
+	// Wait for the async Cleanup goroutine to finish processing files
+	// that were dispatched in CloseProcess mode.  This ensures all
+	// CompressFile / MoveToOutputDir calls have already done UploadWg.Add(1)
+	// before we check UploadWg below (no missed Add/Wait race).
+	ch.pendingWg.Wait()
+
 	ch.cleanupMu.Lock()
 	if len(ch.pendingFiles) > 0 {
 		ch.processPendingQueue()
