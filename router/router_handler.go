@@ -962,13 +962,12 @@ func ServeLiveThumb(c *gin.Context) {
 		// 2 — seek near the end (avoid blank first frame in completed files)
 		for attempt := 0; attempt < 3 && !thumbOK; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 			config.AcquireFFmpeg()
+			defer config.ReleaseFFmpeg()
 			args := []string{"-y"}
 			switch attempt {
 			case 0:
-				// Fragmented MP4 input: force MP4 demuxer, generate PTS.
-				// This handles in-progress fMP4 files where moov atom is
-				// not yet written (written at end when recording finishes).
 				args = append(args,
 					"-f", "mp4",
 					"-flags", "+genpts",
@@ -979,7 +978,6 @@ func ServeLiveThumb(c *gin.Context) {
 					cachePath,
 				)
 			case 1:
-				// Standard MOV demuxer—no seeking, reads from start.
 				args = append(args,
 					"-i", newest,
 					"-vframes", "1",
@@ -988,7 +986,6 @@ func ServeLiveThumb(c *gin.Context) {
 					cachePath,
 				)
 			case 2:
-				// Seek near the end (only useful for completed files).
 				args = append(args,
 					"-sseof", "-3",
 					"-i", newest,
@@ -999,8 +996,6 @@ func ServeLiveThumb(c *gin.Context) {
 				)
 			}
 			err := config.FFmpegCommandContext(ctx, args...).Run()
-			config.ReleaseFFmpeg()
-			cancel()
 			if err == nil {
 				data, readErr := os.ReadFile(cachePath)
 				if readErr == nil {

@@ -742,7 +742,6 @@ func (m *Manager) Publish(evt entity.Event, info *entity.ChannelInfo) {
 			last := m.logRateLimit[info.Username]
 			now := time.Now()
 			if now.Sub(last) < time.Second {
-				m.logRateLimit[info.Username] = now
 				m.logRateLimitMu.Unlock()
 				return
 			}
@@ -794,7 +793,6 @@ func (m *Manager) PublishLog(username, line string) {
 	last := m.logRateLimit[username]
 	now := time.Now()
 	if now.Sub(last) < time.Second {
-		m.logRateLimit[username] = now
 		m.logRateLimitMu.Unlock()
 		return
 	}

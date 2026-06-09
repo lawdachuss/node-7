@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/teacat/chaturbate-dvr/config"
@@ -20,6 +21,8 @@ import (
 	"github.com/teacat/chaturbate-dvr/server"
 	"github.com/teacat/chaturbate-dvr/uploader"
 )
+
+var pendingDirMu sync.Mutex
 
 type Pattern struct {
 	Username string
@@ -353,8 +356,12 @@ func (ch *Channel) MoveToOutputDir(srcPath string) string {
 
 	destPath := uniqueDestPath(filepath.Join(destDir, filepath.Base(srcPath)))
 	ch.Info("output-dir: moving %s (%s) -> %s", filepath.Base(srcPath), resolvePathForLog(srcPath), destPath)
+	// Mark in-flight before moveFile so the watcher's fsnotify handler
+	// sees the file as already claimed by the pipeline.
+	MarkUploadInFlight(destPath)
 	if err := moveFile(srcPath, destPath); err != nil {
 		ch.Error("output-dir: move %s to %s: %s — uploading from original location (%s)", filepath.Base(srcPath), destDir, err.Error(), resolvePathForLog(srcPath))
+		MarkUploadInFlight(srcPath)
 		enqueue(srcPath)
 		return srcPath
 	}
@@ -365,6 +372,7 @@ func (ch *Channel) MoveToOutputDir(srcPath string) string {
 	// the original location.
 	if _, statErr := os.Stat(destPath); statErr != nil {
 		ch.Error("output-dir: post-move stat of dest %s failed: %v — uploading from original location (%s)", destPath, statErr, resolvePathForLog(srcPath))
+		MarkUploadInFlight(srcPath)
 		enqueue(srcPath)
 		return srcPath
 	}
@@ -1342,6 +1350,9 @@ func mergeVideos(inputs []string, outputPath string) error {
 // so the caller should stop processing it.  Returns false when the caller
 // should proceed with its normal upload logic.
 func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
+	pendingDirMu.Lock()
+	defer pendingDirMu.Unlock()
+
 	minDur := ch.Config.MinDurationBeforeUpload
 	if minDur <= 0 {
 		if server.Config != nil && server.Config.MinDurationBeforeUpload > 0 {
@@ -1463,6 +1474,9 @@ func (ch *Channel) handleMinDurationAndMerge(videoPath string) bool {
 // This is called during startup orphan cleanup so short segments from a previous
 // run don't stay pending forever when no new recording arrives.
 func processAllPendingSegments() {
+	pendingDirMu.Lock()
+	defer pendingDirMu.Unlock()
+
 	minDur := 0
 	if server.Config != nil {
 		minDur = server.Config.MinDurationBeforeUpload

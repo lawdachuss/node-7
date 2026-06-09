@@ -114,7 +114,9 @@ func (ch *Channel) CompressFile(srcPath string) {
 
 		config.AcquireFFmpegHeavy()
 		defer config.ReleaseFFmpegHeavy()
-		cmd := config.FFmpegCommand(args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		cmd := config.FFmpegCommandContext(ctx, args...)
                 output, err := cmd.CombinedOutput()
                 if err != nil {
                         ch.Error("compress: failed %s - %s", srcFilename, err.Error())

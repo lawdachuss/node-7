@@ -706,6 +706,12 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					ch.Error("pipeline: thumbnail panicked for %s: %v", filename, r)
+					thumbErr = fmt.Errorf("thumbnail panic: %v", r)
+				}
+			}()
 			thumbErr = p.stageThumbnail(ch)
 		}()
 
@@ -713,16 +719,15 @@ func (pq *PipelineQueue) processPipeline(p *Pipeline) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			UploadSem <- struct{}{}
+			defer func() { <-UploadSem }()
 			defer func() {
 				if r := recover(); r != nil {
 					ch.Error("pipeline: upload goroutine panicked for %s: %v", filename, r)
 					uploadErr = fmt.Errorf("upload panic: %v", r)
-					<-UploadSem
 				}
 			}()
-			UploadSem <- struct{}{}
 			uploadErr = p.stageUploadVideos(ch)
-			<-UploadSem
 		}()
 
 		// Wait for both to finish
@@ -865,16 +870,23 @@ func (pq *PipelineQueue) EnqueueFile(filePath string) {
 		}
 	}
 	dur, _ := VideoDurationSeconds(filePath)
-	if saveErr := server.SaveRecordingBasics(
-		pq.ch.Config.Username, base, timestamp,
-		roomTitle, tags, viewers,
-		gender, resolution, framerate,
-		fileSize, dur,
-	); saveErr != nil {
-		pq.ch.Warn("pipeline: could not save early metadata for %s: %v", base, saveErr)
-	} else {
-		pq.ch.Info("pipeline: saved early metadata for %s", base)
-	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				pq.ch.Error("pipeline: SaveRecordingBasics panicked for %s: %v", base, r)
+			}
+		}()
+		if saveErr := server.SaveRecordingBasics(
+			pq.ch.Config.Username, base, timestamp,
+			roomTitle, tags, viewers,
+			gender, resolution, framerate,
+			fileSize, dur,
+		); saveErr != nil {
+			pq.ch.Warn("pipeline: could not save early metadata for %s: %v", base, saveErr)
+		} else {
+			pq.ch.Info("pipeline: saved early metadata for %s", base)
+		}
+	}()
 
 	// Persist initial state for crash recovery (best-effort).
 	if hErr := server.SavePipelineState(p.toDBState()); hErr != nil {
