@@ -175,8 +175,29 @@ func isProxyError(err error) bool {
 		strings.Contains(msg, "no reachable proxy")
 }
 
+// cdnHostSuffixes lists CDN hostname suffixes that serve HLS segments
+// with signed URLs (pkey/token). These hosts are directly reachable from
+// any region — the proxy is only needed for geo-unblocking API requests
+// (chaturbate.com, stripchat.com). Bypassing the proxy for CDN eliminates
+// the slow-proxy → timeout → pkey-expiry failure chain.
+var cdnHostSuffixes = []string{
+	".doppiocdn.net",
+	".doppiocdn.com",
+	".live.mmcdn.com",
+}
+
+func isCDNHost(host string) bool {
+	host = strings.ToLower(host)
+	for _, suffix := range cdnHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *httpcloakTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme == "http" {
+	if req.URL.Scheme == "http" || isCDNHost(req.URL.Host) {
 		return http.DefaultTransport.RoundTrip(req)
 	}
 
