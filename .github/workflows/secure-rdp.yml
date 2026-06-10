@@ -325,7 +325,7 @@ jobs:
             Write-Host "[OK] Cookie refresh step completed"
           }
 
-      - name: Write .env + install deps + start DVR + tunnel
+      - name: Write .env + install deps + create scheduled tasks
         shell: powershell
         env:
           MINI_ENV: ${{ secrets.env }}
@@ -470,148 +470,7 @@ jobs:
             Write-Warning "Task may not have been created successfully"
           }
           
-          # ====== START DVR DIRECTLY FOR TESTING ======
-          # Start DVR process in background with full output capture,
-          # bypassing the scheduled task wrapper for immediate visibility.
-          # This lets us see startup errors in the CI log directly.
-          Write-Host "=== Starting DVR directly for test ==="
-          $dvrLog = "$repoDir\dvr-output.log"
-          
-          # Set proxy env vars for this CI process (same as wrapper script does)
-          $backupHTTP = $env:HTTP_PROXY
-          $backupHTTPS = $env:HTTPS_PROXY
-          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
-          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
-          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
-          
-          # Launch DVR as a background process, capturing both stdout and stderr
-          $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
-          Write-Host "[OK] DVR PID: $($dvrProcess.Id)"
-          
-          # Restore HTTP_PROXY env vars (needed for subsequent steps)
-          if ($backupHTTP) { $env:HTTP_PROXY = $backupHTTP }
-          if ($backupHTTPS) { $env:HTTPS_PROXY = $backupHTTPS }
-          
-          # Give DVR a moment to start up
-          Start-Sleep -Seconds 2
-          
-          # Wait for DVR to listen on port 8080
-          Write-Host "=== Waiting for DVR to be ready ==="
-          Write-Host "Waiting for DVR to listen on port 8080..."
-          $dvrReady = $false
-          for ($i = 0; $i -lt 90; $i++) {
-            # Check if DVR process died
-            if ($dvrProcess.HasExited) {
-              Write-Host "[ERROR] DVR process exited unexpectedly (code: $($dvrProcess.ExitCode))"
-              Write-Host "=== DVR stdout ==="
-              Get-Content $dvrLog -ErrorAction SilentlyContinue
-              Write-Host "=== DVR stderr ==="
-              Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
-              break
-            }
-            
-            try {
-              $listener = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
-              if ($listener) {
-                Write-Host "[OK] DVR is listening on port 8080"
-                $dvrReady = $true
-                break
-              }
-            } catch {}
-            Write-Host "  Waiting... ($($i+1)/90)"
-            Start-Sleep -Seconds 2
-          }
-          
-          if (-not $dvrReady) {
-            # Show partial DVR output for debugging
-            Write-Host ""
-            Write-Host "=== DVR stdout (last 50 lines) ==="
-            Get-Content $dvrLog -Tail 50 -ErrorAction SilentlyContinue
-            Write-Host "=== DVR stderr ==="
-            Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
-            
-            Write-Host ""
-            Write-Host "=== Diagnostics ==="
-            Write-Host "Checking if DVR process is running..."
-            Get-Process -Name "chaturbate-dvr","powershell" -ErrorAction SilentlyContinue | Format-Table
-            
-            Write-Host ""
-            Write-Host "Checking if binary exists..."
-            if (Test-Path $dvrExe) {
-              Write-Host "[OK] Binary exists: $dvrExe"
-            } else {
-              Write-Host "[ERROR] Binary NOT found: $dvrExe"
-            }
-            
-            Write-Host ""
-            Write-Host "Checking if .env exists..."
-            if (Test-Path "$repoDir\.env") {
-              Write-Host "[OK] .env exists: $repoDir\.env"
-            } else {
-              Write-Host "[ERROR] .env NOT found: $repoDir\.env"
-            }
-            
-            Write-Error "DVR not detected on port 8080 after 180 seconds"
-            exit 1
-          }
-          
-          # DVR is running and listening via direct process.
-          # Keep it alive for the current CI session instead of using
-          # the scheduled task (which has issues with SYSTEM account startup).
-          # The scheduled task remains registered for persistence on reboots.
-          Write-Host "[OK] DVR is running (PID: $($dvrProcess.Id))"
-          
-          # Verify DVR is responding to HTTP requests
-          $dvrResponding = $false
-          for ($i = 0; $i -lt 10; $i++) {
-            try {
-              # Try to connect to the DVR web interface
-              # Accept both 200 OK and 404 Not Found as valid responses (DVR is running)
-              $response = Invoke-WebRequest -Uri "http://localhost:8080" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
-              Write-Host "[OK] DVR is responding to HTTP requests (Status: $($response.StatusCode))"
-              $dvrResponding = $true
-              break
-            } catch {
-              # Check if it's a 404 error (which means DVR is actually responding)
-              if ($_.Exception.Response.StatusCode -eq 404) {
-                Write-Host "[OK] DVR is responding to HTTP requests (Status: 404 - DVR is running)"
-                $dvrResponding = $true
-                break
-              }
-              Write-Host "  Attempt $($i+1)/10 - $($_.Exception.Message)"
-              Start-Sleep -Seconds 2
-            }
-          }
-          
-          if (-not $dvrResponding) {
-            Write-Error "DVR is not responding to HTTP requests after 20 seconds"
-            Write-Host "Checking scheduled task status..."
-            Get-ScheduledTask -TaskName $taskName | Select-Object TaskName, State, LastRunTime
-            Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            Write-Host "Checking if process is running..."
-            Get-Process -Name "chaturbate-dvr" -ErrorAction SilentlyContinue | Format-Table
-            Write-Host "Checking if .env file exists..."
-            if (Test-Path "$repoDir\.env") {
-              Write-Host "[OK] .env file exists at $repoDir\.env"
-            } else {
-              Write-Warning ".env file not found at $repoDir\.env"
-            }
-            exit 1
-          }
-          
-          # Additional check: Try to verify config is loaded by checking the web UI
-          Write-Host "Verifying DVR configuration is loaded..."
-          try {
-            $configCheck = Invoke-WebRequest -Uri "http://localhost:8080" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction SilentlyContinue
-            if ($configCheck.Content -match "Supabase|COOKIES") {
-              Write-Host "[OK] DVR configuration appears to be loaded"
-            }
-          } catch {
-            Write-Host "[INFO] Could not verify config from web UI (this is normal if root path returns 404)"
-          }
-
-          # Step 3: Install and start cloudflared tunnel
+          Write-Host "[OK] DVR scheduled task created (with proxy wrapper)"
           Write-Host "=== Setting up Cloudflare tunnel ==="
           
           # Download cloudflared to repo directory
@@ -742,45 +601,7 @@ jobs:
               }
             }
             
-            # Start the tunnel immediately
-            Write-Host "Starting cloudflared tunnel via scheduled task..."
-            cmd /c "schtasks /Run /TN `"CloudflareTunnel`""
-            
-            # Wait for tunnel URL
-            Write-Host "Waiting for tunnel URL..."
-            $tunnelUrl = $null
-            for ($i = 0; $i -lt 45; $i++) {
-              Start-Sleep -Seconds 1
-              if (Test-Path $tunnelUrlFile) {
-                $urlContent = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
-                if ($urlContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
-                  $tunnelUrl = $Matches[0]
-                  Write-Host "[OK] Tunnel URL found: $tunnelUrl"
-                  echo "CLOUDFLARE_TUNNEL_URL=$tunnelUrl" >> $env:GITHUB_ENV
-                  break
-                }
-              }
-              if ($i % 10 -eq 0 -and $i -gt 0) {
-                Write-Host "  Still waiting for tunnel URL... ($i/45 seconds)"
-              }
-            }
-            
-            if (-not $tunnelUrl) {
-              Write-Warning "Tunnel URL not found after 45 seconds"
-              Write-Host "=== Checking tunnel log ==="
-              if (Test-Path $tunnelLogPath) {
-                Get-Content $tunnelLogPath -ErrorAction SilentlyContinue
-              } else {
-                Write-Host "Tunnel log not found"
-              }
-              if (Test-Path $tunnelUrlFile) {
-                Write-Host "=== Tunnel URL file content ==="
-                Get-Content $tunnelUrlFile -ErrorAction SilentlyContinue
-              }
-              Write-Host "The tunnel task will keep retrying - check tunnel.log via RDP"
-            }
-            
-            Write-Host "[OK] Cloudflared tunnel wrapper is running with auto-reconnect"
+            Write-Host "[OK] Cloudflared tunnel scheduled task created (for reboot persistence)"
           }
 
       - name: Configure Proxy for DVR and Browsers
@@ -898,87 +719,146 @@ jobs:
           Write-Host "   Password: $env:RDP_PASSWORD"
           Write-Host ""
           Write-Host "========================================"
-          Write-Host "  DVR ACCESS (AUTOMATIC)"
+          Write-Host "  DVR and tunnel will start in next step"
           Write-Host "========================================"
-          Write-Host ""
-          Write-Host "DVR is running as a background process (PID: $($dvrProcess.Id))"
-          Write-Host "Access from inside RDP: http://localhost:8080"
-          Write-Host "Access from your PC: http://$env:TAILSCALE_IP`:8080"
-          Write-Host ""
-          # Try reading latest tunnel URL from file (for auto-reconnect)
-          if (-not $env:CLOUDFLARE_TUNNEL_URL) {
-            $tunnelUrlFile = "D:\repos\MiniDelectableService\tunnel-url.txt"
-            if (Test-Path $tunnelUrlFile) {
-              $env:CLOUDFLARE_TUNNEL_URL = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
-            }
-          }
-          if ($env:CLOUDFLARE_TUNNEL_URL) {
-            Write-Host "PUBLIC ACCESS (via Cloudflare Tunnel):"
-            Write-Host "  $env:CLOUDFLARE_TUNNEL_URL"
-            Write-Host ""
-          }
-          Write-Host "The DVR starts automatically - no manual steps needed!"
-          Write-Host "The Cloudflare tunnel starts automatically - no manual steps needed!"
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "Tailscale Status:"
-          & $tailscale status
           $LASTEXITCODE = 0
-          Write-Host ""
-          Write-Host "RDP Status:"
-          netstat -an | findstr :3389
-          $LASTEXITCODE = 0
-          Write-Host ""
-          Write-Host "Proxy Public IP:"
-          try {
-            $ip = $null
-            $proxy8888 = Get-NetTCPConnection -LocalPort 8888 -State Listen -ErrorAction SilentlyContinue
-            if ($proxy8888) {
-              $ip = curl.exe -x http://127.0.0.1:8888 -s -m 10 https://api.ipify.org 2>$null
-            } elseif ($env:ALL_PROXY) {
-              $ip = curl.exe -x $env:ALL_PROXY -s -m 10 https://api.ipify.org 2>$null
-            }
-            if ($ip -match '^\d+\.\d+\.\d+\.\d+$') {
-              Write-Host "  $($ip.Trim())"
-            } elseif ($env:ALL_PROXY) {
-              Write-Host "  (unavailable)"
-            } else {
-              Write-Host "  (no proxy configured)"
-            }
-          } catch { Write-Host "  (unavailable)" }
-          $LASTEXITCODE = 0
-          Write-Host ""
-          if ($env:CLOUDFLARE_TUNNEL_URL) {
-            Write-Host "CLOUDFLARE TUNNEL: $env:CLOUDFLARE_TUNNEL_URL"
-          }
-          Write-Host "DIRECT (via Tailscale): http://$env:TAILSCALE_IP`:8080"
-          exit 0
 
       - name: Keep Runner Alive
         shell: powershell
         run: |
-          Write-Host "Keeping runner alive for up to 5 hours and 50 minutes..."
-          Write-Host ""
-          if ($env:CLOUDFLARE_TUNNEL_URL) {
-            Write-Host "============================================"
-            Write-Host "  CLOUDFLARE TUNNEL (PUBLIC ACCESS)"
-            Write-Host "============================================"
-            Write-Host ""
-            Write-Host "  $env:CLOUDFLARE_TUNNEL_URL"
-            Write-Host ""
-            Write-Host "============================================"
-            Write-Host ""
+          $repoDir = "D:\repos\MiniDelectableService"
+          $dvrExe = "$repoDir\chaturbate-dvr.exe"
+          $videosDir = "D:\videos"
+          $cloudflaredPath = "$repoDir\cloudflared.exe"
+          $dvrLog = "$repoDir\dvr-output.log"
+          $tunnelLogPath = "$repoDir\tunnel.log"
+          $tunnelUrlFile = "$repoDir\tunnel-url.txt"
+          
+          # ====== START DVR ======
+          Write-Host "=== Starting DVR ==="
+          
+          $backupHTTP = $env:HTTP_PROXY
+          $backupHTTPS = $env:HTTPS_PROXY
+          Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+          Remove-Item Env:http_proxy -ErrorAction SilentlyContinue
+          Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
+          
+          $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
+          Write-Host "[OK] DVR PID: $($dvrProcess.Id)"
+          
+          if ($backupHTTP) { $env:HTTP_PROXY = $backupHTTP }
+          if ($backupHTTPS) { $env:HTTPS_PROXY = $backupHTTPS }
+          
+          Write-Host "Waiting for DVR to listen on port 8080..."
+          $dvrReady = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            if ($dvrProcess.HasExited) {
+              Write-Host "[ERROR] DVR process exited unexpectedly (code: $($dvrProcess.ExitCode))"
+              Write-Host "=== DVR stdout ==="
+              Get-Content $dvrLog -ErrorAction SilentlyContinue
+              Write-Host "=== DVR stderr ==="
+              Get-Content "$repoDir\dvr-err.log" -ErrorAction SilentlyContinue
+              break
+            }
+            try {
+              $listener = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
+              if ($listener) {
+                Write-Host "[OK] DVR is listening on port 8080"
+                $dvrReady = $true
+                break
+              }
+            } catch {}
+            Start-Sleep -Seconds 2
           }
           
+          if (-not $dvrReady) {
+            Write-Error "DVR not detected on port 8080 after 180 seconds"
+            exit 1
+          }
+          
+          # Verify HTTP response
+          Write-Host "Verifying DVR HTTP response..."
+          $dvrResponding = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:8080" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+              Write-Host "[OK] DVR is responding (Status: $($response.StatusCode))"
+              $dvrResponding = $true
+              break
+            } catch {
+              if ($_.Exception.Response.StatusCode -eq 404) {
+                Write-Host "[OK] DVR is responding (Status: 404 - DVR is running)"
+                $dvrResponding = $true
+                break
+              }
+              Start-Sleep -Seconds 2
+            }
+          }
+          
+          if (-not $dvrResponding) {
+            Write-Error "DVR not responding to HTTP requests"
+            exit 1
+          }
+          
+          # ====== START CLOUDFLARE TUNNEL ======
+          Write-Host "=== Starting Cloudflare tunnel ==="
+          if (Test-Path $cloudflaredPath) {
+            cmd /c "schtasks /Run /TN `"CloudflareTunnel`""
+            Write-Host "Waiting for tunnel URL..."
+            $tunnelUrl = $null
+            for ($i = 0; $i -lt 45; $i++) {
+              Start-Sleep -Seconds 1
+              if (Test-Path $tunnelUrlFile) {
+                $urlContent = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+                if ($urlContent -match 'https://[a-z0-9\-]+\.trycloudflare\.com') {
+                  $tunnelUrl = $Matches[0]
+                  Write-Host "[OK] Tunnel URL found: $tunnelUrl"
+                  break
+                }
+              }
+              if ($i % 10 -eq 0 -and $i -gt 0) {
+                Write-Host "  Still waiting... ($i/45 seconds)"
+              }
+            }
+            if (-not $tunnelUrl) {
+              Write-Warning "Tunnel URL not found after 45 seconds - DVR still accessible via Tailscale"
+            }
+          } else {
+            Write-Host "[SKIP] cloudflared not found - DVR accessible via Tailscale only"
+          }
+          
+          # ====== SHOW CONNECTION INFO ======
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "  DVR ACCESS"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "PID: $($dvrProcess.Id)"
+          Write-Host "Access from inside RDP: http://localhost:8080"
+          Write-Host "Access from your PC: http://$env:TAILSCALE_IP`:8080"
+          if ($tunnelUrl) {
+            Write-Host "PUBLIC ACCESS: $tunnelUrl"
+          }
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host ""
+          
+          # ====== KEEP-ALIVE LOOP ======
+          Write-Host "Keeping runner alive for up to 5 hours and 50 minutes..."
+          if ($tunnelUrl) {
+            Write-Host "Tunnel URL: $tunnelUrl"
+          }
+          Write-Host ""
+          
           $startTime = if ($env:START_TIME) { [int64]$env:START_TIME } else { [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
-          $targetDuration = 350 * 60 # 5 hours and 50 minutes in seconds
+          $targetDuration = 350 * 60
           
           while ($true) {
             $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             $elapsed = $now - $startTime
             if ($elapsed -ge $targetDuration) {
-              Write-Host "Elapsed time ($elapsed seconds) reached target duration ($targetDuration seconds)."
+              Write-Host "Session timeout reached ($elapsed seconds)."
               break
             }
             
@@ -986,12 +866,16 @@ jobs:
             $sleepSecs = [Math]::Min($remaining, 60)
             if ($sleepSecs -le 0) { break }
             
-              # Refresh tunnel URL from file (auto-reconnect may have changed it)
-            $tunnelUrlFile = "D:\repos\MiniDelectableService\tunnel-url.txt"
+            # Refresh tunnel URL and check DVR health
             if (Test-Path $tunnelUrlFile) {
-              $env:CLOUDFLARE_TUNNEL_URL = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
+              $tunnelUrl = Get-Content $tunnelUrlFile -Raw -ErrorAction SilentlyContinue
             }
-            $status = if ($env:CLOUDFLARE_TUNNEL_URL) { " | PUBLIC: $env:CLOUDFLARE_TUNNEL_URL" } else { "" }
+            if ($dvrProcess.HasExited) {
+              Write-Host "[WARNING] DVR process exited (code: $($dvrProcess.ExitCode)) - restarting..."
+              $dvrProcess = Start-Process -FilePath $dvrExe -ArgumentList "--no-tunnel --output-dir `"$videosDir`"" -NoNewWindow -RedirectStandardOutput $dvrLog -RedirectStandardError "$repoDir\dvr-err.log" -PassThru
+            }
+            
+            $status = if ($tunnelUrl) { " | PUBLIC: $tunnelUrl" } else { "" }
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Tailscale: $env:TAILSCALE_IP$status (Elapsed: $([Math]::Round($elapsed/60, 1))m, Remaining: $([Math]::Round($remaining/60, 1))m)"
             
             Start-Sleep -Seconds $sleepSecs
@@ -1001,10 +885,9 @@ jobs:
           $branch = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "main" }
           gh workflow run secure-rdp.yml --repo $env:GITHUB_REPOSITORY --ref $branch
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] Next workflow triggered - it will start shortly"
+            Write-Host "[OK] Next workflow triggered"
           } else {
-            Write-Host "[WARNING] Failed to auto-trigger next run. Cron schedule (every 6 hours) will handle it."
+            Write-Host "[WARNING] Failed to auto-trigger. Cron schedule will handle it."
           }
           Write-Host "NOTE: DVR and Cloudflare tunnel will continue running via scheduled tasks"
-          $LASTEXITCODE = 0
           exit 0
