@@ -26,7 +26,7 @@ type httpcloakTransport struct {
 
 var sharedCloakTransport = sync.OnceValue(func() http.RoundTripper {
 	opts := []httpcloak.Option{
-		httpcloak.WithTimeout(30 * time.Second),
+		httpcloak.WithTimeout(120 * time.Second),
 	}
 	if proxyURL := configuredProxyURL(); proxyURL != "" {
 		opts = append(opts, httpcloak.WithProxy(proxyURL))

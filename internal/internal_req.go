@@ -148,9 +148,56 @@ func (h *Req) Head(ctx context.Context, url string) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// CreateRequest constructs an HTTP GET request with necessary headers.
+// GetBytesWithTimeout is like GetBytes but with a caller-specified timeout.
+// This is needed for proxied CDN segment downloads where the SOCKS5 proxy
+// adds significant latency — the default 30s may not be enough to read
+// multi-megabyte video segments end-to-end.
+func (h *Req) GetBytesWithTimeout(ctx context.Context, url string, timeout time.Duration) ([]byte, error) {
+	req, cancel, err := CreateRequestWithTimeout(ctx, url, timeout)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+	defer cancel()
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+
+	if strings.Contains(string(b), "Verify your age") {
+		return nil, ErrAgeVerification
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		snippet := string(b)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("unexpected HTTP %d: %s", resp.StatusCode, snippet)
+	}
+
+	return b, nil
+}
+
+// CreateRequest constructs an HTTP GET request with necessary headers (30s timeout).
 func CreateRequest(ctx context.Context, url string) (*http.Request, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // CDN edge servers can have high latency during peak hours
+	return CreateRequestWithTimeout(ctx, url, 30*time.Second)
+}
+
+// CreateRequestWithTimeout is like CreateRequest but with a custom timeout.
+func CreateRequestWithTimeout(ctx context.Context, url string, timeout time.Duration) (*http.Request, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

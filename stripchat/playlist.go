@@ -187,7 +187,14 @@ func (p *Playlist) processMediaPlaylist(ctx context.Context, client *internal.Re
 		initURL := appendPKey(resolveURL(playlistURL, playlist.Map.URI), p.PKey)
 		initData, initErr := retry.DoWithData(
 			func() ([]byte, error) {
-				return client.GetBytes(ctx, initURL)
+				data, err := client.GetBytesWithTimeout(ctx, initURL, 120*time.Second)
+				if err != nil {
+					if strings.Contains(err.Error(), "unexpected HTTP 404") ||
+						strings.Contains(err.Error(), "unexpected HTTP 403") {
+						return nil, retry.Unrecoverable(err)
+					}
+				}
+				return data, err
 			},
 			retry.Context(ctx),
 			retry.Attempts(5),
@@ -218,7 +225,14 @@ func (p *Playlist) processMediaPlaylist(ctx context.Context, client *internal.Re
 		segmentURL := appendPKey(resolveURL(playlistURL, v.URI), p.PKey)
 		resp, err := retry.DoWithData(
 			func() ([]byte, error) {
-				return client.GetBytes(ctx, segmentURL)
+				data, err := client.GetBytesWithTimeout(ctx, segmentURL, 120*time.Second)
+				if err != nil {
+					if strings.Contains(err.Error(), "unexpected HTTP 404") ||
+						strings.Contains(err.Error(), "unexpected HTTP 403") {
+						return nil, retry.Unrecoverable(err)
+					}
+				}
+				return data, err
 			},
 			retry.Context(ctx),
 			retry.Attempts(5),
