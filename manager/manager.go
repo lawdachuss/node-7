@@ -282,63 +282,42 @@ func (m *Manager) LoadConfig() error {
 // Pooled mode (distributed shards/nodes)
 // ============================================================================
 
-// LoadPooledConfig loads the shared channel pool and creates channels assigned
-// to this node. Called instead of LoadConfig() when CHANNEL_POOL_MODE=pooled.
+// LoadPooledConfig creates local channel objects from the channel_assignments
+// rows assigned to this node.  Called instead of LoadConfig() when
+// CHANNEL_POOL_MODE=pooled.  The channel_assignments table is the sole
+// source of truth — the legacy channel_pool app_settings blob is ignored.
 func (m *Manager) LoadPooledConfig() error {
 	// Restore persisted cookies/user-agent
 	if err := server.LoadSettings(); err != nil {
 		fmt.Printf("[WARN] could not load settings: %v\n", err)
 	}
 
-	// Read the shared pool
-	poolData := server.LoadPoolFromDB()
-	if poolData == nil {
-		return nil // empty pool — no channels yet
-	}
-
-	pool, err := coordinator.UnmarshalPool(poolData)
-	if err != nil {
-		return fmt.Errorf("unmarshal pool: %w", err)
-	}
-
-	if len(pool) == 0 {
-		return nil
-	}
-
-	// Query our assigned channels
 	client := server.GetDBClient()
 	if client == nil {
 		return fmt.Errorf("supabase not configured")
 	}
 
+	// Fetch assignments that belong to this node (status != unassigned).
 	myAssignments, err := client.GetNodeAssignments(server.NodeID())
 	if err != nil {
 		return fmt.Errorf("get node assignments: %w", err)
 	}
 
-	// Build a set of our assigned usernames
-	ours := make(map[string]bool)
+	created := 0
 	for _, a := range myAssignments {
-		ours[a.Username] = true
-	}
-
-	// Create channels for our assignments
-	for _, conf := range pool {
-		if !ours[conf.Username] {
+		if a.Status == "unassigned" || a.AssignedNode == "" {
 			continue
 		}
-		if conf.IsPaused.Load() {
-			continue
-		}
-
+		conf := coordinator.ConfigFromAssignment(&a)
 		ch := channel.New(conf)
 		m.Channels.Store(conf.Username, ch)
 		ch.PipelineQueue.ResumePending()
 		ch.Resume(0)
+		created++
 	}
 
 	fmt.Printf("[manager] LoadPooledConfig: loaded %d channel(s) for node %q\n",
-		m.channelCount(), server.NodeID())
+		created, server.NodeID())
 
 	// Cleanup orphans + watcher (same as LoadConfig)
 	go func() {
