@@ -76,193 +76,193 @@ jobs:
       - name: Connect Netherlands Proxy (SOCKS5)
         shell: powershell
         run: |
-          function log {
-            param($m)
-            Write-Host $m
-            [System.Console]::Out.Flush()
-          }
+          function log { param($m) Write-Host $m; [System.Console]::Out.Flush() }
 
           function Fetch-Proxies($url) {
             try {
               $raw = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 15 -ErrorAction Stop
               $list = @()
               foreach ($line in ($raw -split "`n")) {
-                $line = $line.Trim()
-                if ($line -ne "" -and $line -notmatch '^#') {
-                  if ($line -match '^socks5://') { $list += $line }
-                  elseif ($line -match '^(\d+\.\d+\.\d+\.\d+):(\d+)$') { $list += "socks5://$line" }
-                }
+                $t = $line.Trim()
+                if ($t -eq "" -or $t -match '^#') { continue }
+                if ($t -match '^socks5://') { $list += $t }
+                elseif ($t -match '^(\d+\.\d+\.\d+\.\d+):(\d+)$') { $list += "socks5://$t" }
               }
               return $list
             } catch { return @() }
           }
 
-          function Test-Proxy($proxyUrl) {
-            try {
-              $ip = curl.exe -x $proxyUrl -s --connect-timeout 2 -m 3 https://api.ipify.org 2>$null
-              if ($ip -notmatch '^\d+\.\d+\.\d+\.\d+$') { return $null }
-              $cb = curl.exe -x $proxyUrl -s -o NUL -w "%{http_code}" --connect-timeout 2 -m 3 https://chaturbate.com 2>$null
-              if ($cb -ne "200") { return $null }
-              return $ip.Trim()
-            } catch {}
-            return $null
-          }
-
-          function Test-ProxyJob {
-            param($proxyUrl)
-            $result = Test-Proxy $proxyUrl
-            if ($result) { return @{url=$proxyUrl; ip=$result} }
-            return $null
+          # ── If a PROXY_URLS secret is set, use it directly and skip discovery ──
+          $secretProxy = "${{ secrets.PROXY_URLS }}"
+          if (-not [string]::IsNullOrWhiteSpace($secretProxy)) {
+            log "=== Using pre-configured PROXY_URLS secret ==="
+            $secretList = @($secretProxy -split '[,\s]+' | Where-Object { $_ -match '^socks5://' })
+            if ($secretList.Count -gt 0) {
+              $primary = $secretList[0]
+              echo "PROXY_URL=$($secretList -join ',')" >> $env:GITHUB_ENV
+              echo "ALL_PROXY=$primary" >> $env:GITHUB_ENV
+              echo "all_proxy=$primary" >> $env:GITHUB_ENV
+              echo "SOCKS_PROXY=$primary" >> $env:GITHUB_ENV
+              & git config --global http.proxy $primary
+              & git config --global https.proxy $primary
+              try {
+                $ip  = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null
+                $loc = curl.exe -x $primary -s -m 10 https://ipinfo.io/json 2>$null | ConvertFrom-Json
+                log "Public IP: $ip / $($loc.country) - $($loc.org)"
+              } catch { log "Verification skipped: $_" }
+              $LASTEXITCODE = 0; log "[OK] SOCKS5 proxy configured from secret."; exit 0
+            }
           }
 
           log "=== Fetching live SOCKS5 proxies ==="
           $allProxies = @()
 
-          # Source 1: ProxyScrape API - Netherlands SOCKS5
-          log "Fetching NL proxies from ProxyScrape API..."
-          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=nl"
-          log "  Got $($allProxies.Count) NL proxies from API"
+          # NL-specific (highest priority)
+          log "Fetching NL proxies..."
+          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=nl&timeout=5000"
+          log "  NL so far: $($allProxies.Count)"
 
-          # Source 2: jsDelivr CDN mirror of ProxyScrape - Netherlands SOCKS5
-          log "Fetching NL proxies from CDN mirror..."
+          # IN-specific
+          log "Fetching IN proxies..."
+          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=in&timeout=5000"
+          log "  NL+IN so far: $($allProxies.Count)"
+
+          # DE-specific (geographically close to NL)
+          log "Fetching DE proxies..."
+          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=de&timeout=5000"
+
+          # Broad community lists
+          $allProxies += Fetch-Proxies "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+          $allProxies += Fetch-Proxies "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
           $allProxies += Fetch-Proxies "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/nl/socks5/data.txt"
-          log "  Total: $($allProxies.Count) NL proxies"
 
-          # Source 3: ProxyScrape API - India SOCKS5 (fallback region)
-          log "Fetching IN proxies from ProxyScrape API..."
-          $allProxies += Fetch-Proxies "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&format=text&protocol=socks5&country=in"
-          log "  Total: $($allProxies.Count) proxies (NL + IN)"
-
-          # Source 4: All regions SOCKS5 from CDN mirror (broad fallback)
-          log "Fetching all-region proxies from CDN mirror..."
-          $allProxies += Fetch-Proxies "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/socks5/data.txt"
-          
-          # Remove duplicates
-          $allProxies = $allProxies | Select-Object -Unique
-          log "Total unique proxies to test: $($allProxies.Count)"
-
-          # Shuffle to avoid testing dead proxies first
-          $allProxies = $allProxies | Sort-Object { Get-Random }
+          $allProxies = ($allProxies | Select-Object -Unique | Sort-Object { Get-Random }) | Select-Object -First 120
+          log "Total unique proxies to test (capped at 120): $($allProxies.Count)"
 
           if ($allProxies.Count -eq 0) {
-            log "WARNING: No proxies fetched from APIs. Using emergency fallback list."
+            log "WARNING: No proxies fetched. Using emergency fallback list."
             $allProxies = @(
               "socks5://5.255.117.250:1080",
               "socks5://185.233.184.165:1080",
               "socks5://5.255.113.177:1080",
               "socks5://103.139.106.174:1080",
-              "socks5://103.139.106.200:1080",
-              "socks5://103.139.107.14:1080"
+              "socks5://103.139.106.200:1080"
             )
           }
 
-          $maxProxies = 5
-          $workingProxies = @()
-          $fallbackProxies = @()
-
           log ""
-          log "=== Testing ALL $($allProxies.Count) proxies in parallel ==="
-          # Invoke-RestMethod for each proxy in parallel via PowerShell jobs
-          $allWorking = [System.Collections.ArrayList]@()
-          $testBlock = {
-            param($url)
+          log "=== Phase 1: Liveness test (batches of 10, 30s timeout per batch) ==="
+          # Only check if proxy is alive (returns an IP) — fast, parallel
+          # The critical fix: Wait-Job -Timeout 30 (was 5, which killed jobs before curl could finish)
+          $aliveTestBlock = {
+            param($proxyUrl)
             try {
-              $ip = curl.exe -x $url -s --connect-timeout 2 -m 3 https://api.ipify.org 2>$null
-              if ($ip -notmatch '^\d+\.\d+\.\d+\.\d+$') { return $null }
-              # Check chaturbate: follow redirects, reject if face ID/verification page
-              $cbOut = curl.exe -x $url -s -o NUL -w "%{http_code} %{url_effective}" -L --connect-timeout 2 -m 4 https://chaturbate.com 2>$null
-              $code, $finalUrl = $cbOut -split ' ', 2
-              if ($code -ne "200") { return $null }
-              if ($finalUrl -match '(?i)(verify|auth|captcha|face|human|robot)') { return $null }
-              return @{url=$url; ip=$ip.Trim()}
-            } catch { return $null }
-          }
-          # Launch test in batches of 20 to avoid process thrash
-          for ($i = 0; $i -lt $allProxies.Count; $i += 20) {
-            $batch = $allProxies[$i..([math]::Min($i+19, $allProxies.Count-1))]
-            $jobs = @($batch | ForEach-Object { Start-Job -ScriptBlock $testBlock -ArgumentList $_ })
-            $null = $jobs | Wait-Job -Timeout 5 -ErrorAction SilentlyContinue
-            foreach ($j in $jobs) {
-              $r = Receive-Job $j -ErrorAction SilentlyContinue
-              if ($r -and $r.url) { [void]$allWorking.Add($r) }
-              Remove-Job $j -Force -ErrorAction SilentlyContinue
-            }
-            log "  Batch $([math]::Floor($i/20)+1): $($allWorking.Count) working so far"
-          }
-          log "  Tests complete, found $($allWorking.Count) working proxies"
-
-          $maxProxies = [math]::Min(5, $allWorking.Count)
-          foreach ($w in $allWorking) {
-            if ($workingProxies.Count -ge $maxProxies) { break }
-            $country = ""; $org = ""
-            try {
-              # Try ipinfo.io through the proxy
-              $locRaw = curl.exe -x $w.url -s --connect-timeout 3 -m 5 https://ipinfo.io/json 2>$null
-              if (-not $locRaw) {
-                # Fallback: query ipinfo.io with known IP directly (no proxy)
-                Start-Sleep -Milliseconds 200
-                $locRaw = curl.exe -s --connect-timeout 3 -m 5 "https://ipinfo.io/$($w.ip)/json" 2>$null
-              }
-              if (-not $locRaw) {
-                # Second fallback: ip-api.com (free, no API key)
-                Start-Sleep -Milliseconds 200
-                $locRaw = curl.exe -s --connect-timeout 3 -m 5 "http://ip-api.com/json/$($w.ip)" 2>$null
-                if ($locRaw) {
-                  $loc2 = $locRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
-                  if ($loc2 -and $loc2.status -eq "success") {
-                    $country = $loc2.countryCode; $org = $loc2.org
-                  }
-                }
-              } elseif ($locRaw) {
-                $loc = $locRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($loc) { $country = $loc.country; $org = $loc.org }
+              $ip = curl.exe -x $proxyUrl -s --connect-timeout 3 -m 6 https://api.ipify.org 2>$null
+              if ($ip -match '^\d+\.\d+\.\d+\.\d+$') {
+                return @{ url = $proxyUrl; ip = $ip.Trim() }
               }
             } catch {}
-            if ($country -eq "NL" -or $country -eq "IN") {
-              $workingProxies += @{ url = $w.url; ip = $w.ip; country = $country; org = $org }
-              log "WORKING #$($workingProxies.Count): $($w.url) (IP: $($w.ip) / $country - $($org))"
-            }
-            if ($fallbackProxies.Count -eq 0 -and $workingProxies.Count -eq 0) {
-              $fallbackProxies += @{ url = $w.url; ip = $w.ip; country = $country; org = $org }
-            }
+            return $null
           }
 
-          if ($workingProxies.Count -eq 0 -and $fallbackProxies.Count -gt 0) {
-            log "No NL/IN proxies found - using fallback: $($fallbackProxies[0].url) (IP: $($fallbackProxies[0].ip))"
-            $workingProxies = $fallbackProxies
+          $aliveProxies = [System.Collections.ArrayList]@()
+          for ($i = 0; $i -lt $allProxies.Count; $i += 10) {
+            $batch = $allProxies[$i..([math]::Min($i+9, $allProxies.Count-1))]
+            $jobs  = @($batch | ForEach-Object { Start-Job -ScriptBlock $aliveTestBlock -ArgumentList $_ })
+            $null  = $jobs | Wait-Job -Timeout 30 -ErrorAction SilentlyContinue
+            foreach ($j in $jobs) {
+              $r = Receive-Job $j -ErrorAction SilentlyContinue
+              if ($r -and $r.url) { [void]$aliveProxies.Add($r) }
+              Remove-Job $j -Force -ErrorAction SilentlyContinue
+            }
+            log "  Batch $([math]::Floor($i/10)+1): $($aliveProxies.Count) alive so far"
+            if ($aliveProxies.Count -ge 20) { log "  Enough candidates, stopping early."; break }
+          }
+          log "  Phase 1 done: $($aliveProxies.Count) alive proxies found"
+
+          log ""
+          log "=== Phase 2: Chaturbate reachability + geo-lookup ==="
+          $cleanProxies  = [System.Collections.ArrayList]@()
+          $blockedProxies= [System.Collections.ArrayList]@()
+
+          foreach ($w in $aliveProxies) {
+            $cbOut       = curl.exe -x $w.url -s -o NUL -w "%{http_code} %{url_effective}" -L --connect-timeout 3 -m 8 https://chaturbate.com 2>$null
+            $parts       = $cbOut -split ' ', 2
+            $cbCode      = $parts[0]
+            $cbFinalUrl  = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+            $faceId      = ($cbFinalUrl -match '(?i)(verify|auth|captcha|face|human|robot)')
+            $cbOk        = ($cbCode -eq "200")
+
+            # Geo-lookup directly (no extra proxy hop needed — IP is already known)
+            $country = ""; $org = ""
+            try {
+              $locRaw = curl.exe -s --connect-timeout 3 -m 5 "http://ip-api.com/json/$($w.ip)?fields=countryCode,org" 2>$null
+              if ($locRaw) {
+                $loc = $locRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($loc -and $loc.countryCode) { $country = $loc.countryCode; $org = $loc.org }
+              }
+            } catch {}
+
+            $entry = @{ url=$w.url; ip=$w.ip; country=$country; org=$org; faceIdBlocked=$faceId; cbReachable=$cbOk }
+            log "  [$country] $($w.ip) cb=$cbOk faceID=$faceId  $($w.url)"
+
+            if ($cbOk -and -not $faceId)  { [void]$cleanProxies.Add($entry) }
+            elseif ($cbOk)               { [void]$blockedProxies.Add($entry) }
+          }
+          log "  Clean: $($cleanProxies.Count), Face-ID blocked: $($blockedProxies.Count)"
+
+          # ── Pick best proxies (prefer NL/IN/DE, then any) ──────────────────
+          $preferredCountries = @("NL","IN","DE")
+          $workingProxies = @()
+
+          # Pass 1: clean proxies in preferred countries
+          foreach ($w in ($cleanProxies | Sort-Object { if ($_.country -in $preferredCountries) { 0 } else { 1 } })) {
+            if ($workingProxies.Count -ge 5) { break }
+            $workingProxies += $w
+            log "CLEAN #$($workingProxies.Count): $($w.url) [$($w.country)] IP=$($w.ip)"
+          }
+          # Pass 2: face-ID blocked if still 0
+          if ($workingProxies.Count -eq 0) {
+            foreach ($w in ($blockedProxies | Sort-Object { if ($_.country -in $preferredCountries) { 0 } else { 1 } })) {
+              if ($workingProxies.Count -ge 3) { break }
+              $workingProxies += $w
+              log "FACE-ID #$($workingProxies.Count): $($w.url) [$($w.country)] IP=$($w.ip)"
+            }
+          }
+          # Pass 3: any alive proxy (skip CB check entirely)
+          if ($workingProxies.Count -eq 0) {
+            foreach ($w in $aliveProxies) {
+              if ($workingProxies.Count -ge 1) { break }
+              $workingProxies += $w
+              log "ALIVE-FALLBACK #1: $($w.url) IP=$($w.ip)"
+            }
           }
 
           if ($workingProxies.Count -eq 0) {
             Write-Error "No working SOCKS5 proxy found after testing all sources."
             log ""
             log "TROUBLESHOOTING:"
-            log "1. GitHub Actions runners are in US/VA - Chaturbate requires NL or IN IP"
-            log "2. The ProxyScrape free proxy list may be empty or all proxies are dead"
-            log "3. To fix this permanently, set up a PROXY_URL secret with working SOCKS5 proxies"
-            log "   e.g., PROXY_URLS=socks5://user:pass@your-proxy.com:1080"
-            log ""
-            log "Workaround: Use a free proxy provider like Webshare (10 free proxies)"
-            log "Sign up at https://www.webshare.io/ and add your proxies to GitHub secrets"
+            log "1. GitHub Actions runners are in US/VA — Chaturbate often requires NL or IN IP"
+            log "2. Free proxy lists rotate rapidly; most are dead within hours"
+            log "3. FIX: Set a PROXY_URLS secret with your own working SOCKS5 proxy:"
+            log "   e.g. PROXY_URLS=socks5://user:pass@your-proxy.com:1080"
+            log "   Get free proxies: https://www.webshare.io/ (10 free)"
             exit 1
           }
 
           log ""
           log "=== Collected $($workingProxies.Count) working proxies ==="
-
-          # Set primary proxy vars (ALL_PROXY uses first proxy)
           $primary = $workingProxies[0].url
-          $primaryIp = $workingProxies[0].ip
-          $primaryCountry = $workingProxies[0].country
-
-          # Build comma-separated PROXY_URL for Go DVR rotation
           $proxyUrlList = ($workingProxies | ForEach-Object { $_.url }) -join ","
-          echo "PROXY_URL=$proxyUrlList" >> $env:GITHUB_ENV
-          echo "ALL_PROXY=$primary" >> $env:GITHUB_ENV
-          echo "all_proxy=$primary" >> $env:GITHUB_ENV
-          echo "SOCKS_PROXY=$primary" >> $env:GITHUB_ENV
 
-          & git config --global http.proxy $primary
+          echo "PROXY_URL=$proxyUrlList" >> $env:GITHUB_ENV
+          echo "ALL_PROXY=$primary"     >> $env:GITHUB_ENV
+          echo "all_proxy=$primary"     >> $env:GITHUB_ENV
+          echo "SOCKS_PROXY=$primary"   >> $env:GITHUB_ENV
+
+          & git config --global http.proxy  $primary
           & git config --global https.proxy $primary
+
           log "[OK] Git configured to use $primary"
           log "[OK] PROXY_URL set with $($workingProxies.Count) proxies for rotation"
           foreach ($wp in $workingProxies) {
@@ -272,7 +272,7 @@ jobs:
           log ""
           log "Verifying primary proxy egress..."
           try {
-            $ip = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null
+            $ip  = curl.exe -x $primary -s -m 10 https://api.ipify.org 2>$null
             $LASTEXITCODE = 0
             $loc = curl.exe -x $primary -s -m 10 https://ipinfo.io/json 2>$null | ConvertFrom-Json
             $LASTEXITCODE = 0
